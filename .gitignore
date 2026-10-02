@@ -1,0 +1,12 @@
+# Preserved previous repository, Git history, binaries, and analysis.
+/legacy-repository/
+# New IO build outputs.
+/build/
+/out/
+/dist/
+*.obj
+*.pdb
+*.dll
+*.exe
+# Historical workspace documentation is not part of the new repository.
+/docs/
