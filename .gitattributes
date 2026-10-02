@@ -1,0 +1,19 @@
+# Normalize line endings in the repository, independent of local core.autocrlf.
+# Everything text is stored as LF. On Windows, core.autocrlf still converts to
+# CRLF on checkout, so no working copy is forced either way.
+* text=auto eol=lf
+*.ps1 text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.def text eol=lf
+*.md text eol=lf
+*.gitignore text eol=lf
+*.gitattributes text eol=lf
+# Binary artifacts are never converted.
+*.dll binary
+*.exe binary
+*.lib binary
+*.exp binary
+*.pdb binary
+*.obj binary
+*.zip binary
