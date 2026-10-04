@@ -32,8 +32,10 @@
 /* The lever field sits at frame payload offset 10, so wire bytes 11-12 once the
  * report ID byte at 0 is included. Every mode reads it from here. */
 #define LEVER_WIRE_OFFSET 11
-/* A report long enough to contain both lever bytes at that offset. */
-#define MU3_WIRE_WITH_LEVER (LEVER_WIRE_OFFSET + 2)
+/* A report is payload-only until it is long enough to carry a Report ID byte.
+ * This is the same rule the DLL's mu3_hid_unpack applies, so the probe reads the
+ * field the DLL would. */
+#define MU3_WIRE_WITH_ID 65
 
 static void print_caps(HANDLE h)
 {
@@ -187,8 +189,8 @@ static int lever_from(const uint8_t *buf, DWORD got, size_t in_len, int *value)
 {
     size_t at;
     if (in_len > got) return 0;           /* short read: field may be truncated */
-    at = (in_len >= MU3_WIRE_WITH_LEVER) ? LEVER_WIRE_OFFSET
-                                         : LEVER_WIRE_OFFSET - 1;
+    at = (in_len >= MU3_WIRE_WITH_ID) ? LEVER_WIRE_OFFSET
+                                      : LEVER_WIRE_OFFSET - 1;
     if (got < at + 2) return 0;
     *value = (int)(uint16_t)(buf[at] | ((uint16_t)buf[at + 1] << 8));
     return 1;
