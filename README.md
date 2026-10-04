@@ -47,7 +47,7 @@ Building with `/DMU3_IO_REPORT_DISCONNECT` makes poll return `HRESULT_FROM_WIN32
 
 Device connection decides whether input is valid. Once the device connects and one valid report arrives, that report stays in effect until the device goes away, however much time passes. A change-triggered controller sends nothing while the lever and buttons are still, so expiring a report on a timer would release held inputs.
 
-Across processes the same rule holds. Shared memory under `Local\MU3CustomIO-v1` carries a `published_ms` heartbeat that the HID worker refreshes on every tick, and only that heartbeat signals whether the owning process is alive. Report age is never consulted. Input turns neutral two seconds after the owner disappears, and both disconnect and reconnect clear the stored sample so a stale button or card cannot be replayed.
+Across processes the same rule holds. Shared memory under `Local\MU3CustomIO-v1` carries a `published_ms` heartbeat that the HID worker refreshes on every tick, and only that heartbeat signals whether the owning process is alive. Report age is never consulted. An absent owner is detected primarily by the process handle: the reader opens the owner PID with `OpenProcess` and finds it unopenable or already signalled, which is immediate. The five-second heartbeat window is a backstop for a reused PID or a stale mapping, and it is deliberately generous because an idle worker's heartbeat interval is about one second and a reconnect adds a full enumeration, so a tight window would drop input under load. Both disconnect and reconnect clear the stored sample, so a stale button or card cannot be replayed.
 
 ## Report layout
 
@@ -130,6 +130,8 @@ A centred lever reading `0000H` is the lever output, which is 0 at centre for ev
 ## HID matching
 
 The DLL matches on VID `2341` and PID `8036`. It does not constrain report lengths, and an interface reporting 65 in and 65 out is preferred but not required. A read that times out neither refreshes nor invalidates the held input.
+
+Reports are marshalled between this DLL's fixed 65-byte frame and whatever length the descriptor reports. A device reporting 64 carries payload only, so the frame's Report ID byte is dropped on write and supplied as 0 on read; writing all 65 bytes to such a device would place the ID byte where payload belongs, shift everything by one and drop the last payload byte, which mis-drives the lights rather than failing visibly. Devices reporting more than 65 are zero-padded. `tests/hid_pack_tests.c` covers these mappings.
 
 ## Card reader
 

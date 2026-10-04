@@ -30,10 +30,19 @@ typedef struct shared_frame {
     volatile LONG led_sequence;
     uint8_t led_report[65];
 } shared_frame;
-/* A live owner refreshes published_ms on every worker tick (<=250 ms). This is
+/* A live owner refreshes published_ms on every worker tick. This is
  * deliberately independent of report age: a change-triggered controller sends
- * nothing while idle, and that must not look like a dead owner. */
-#define MU3_OWNER_LIVENESS_MS 2000u
+ * nothing while idle, and that must not look like a dead owner.
+ *
+ * Sizing: an idle worker blocks in the read for IO_TIMEOUT_MS (1000 ms) and
+ * ticks once per loop, so the heartbeat interval is about 1000 ms. A reconnect
+ * adds a full SetupAPI enumeration, and the game can contend for the CPU during
+ * load. At 2000 ms the game process could therefore conclude the owner had died
+ * and snap input to neutral under load, which looks like dropped input rather
+ * than a crash. The condition worth detecting is amdaemon.exe actually
+ * vanishing, which is catastrophic and carries no latency requirement, so the
+ * window is deliberately generous. */
+#define MU3_OWNER_LIVENESS_MS 5000u
 static LONG last_led_sequence;
 static SRWLOCK led_lock = SRWLOCK_INIT;
 static SRWLOCK shared_lock = SRWLOCK_INIT;
@@ -218,12 +227,16 @@ HRESULT mu3_io_poll(void)
 void mu3_io_get_opbtns(uint8_t *buttons)
 {
     if (!buttons) return;
+    /* Every entry point initialises first, so a getter called before init still
+     * sees a valid lever config rather than relying on static zero-init. */
+    ensure_init();
     AcquireSRWLockShared(&poll_lock);
     *buttons = polled.operator_buttons & 7;
     ReleaseSRWLockShared(&poll_lock);
 }
 void mu3_io_get_gamebtns(uint8_t *left, uint8_t *right)
 {
+    ensure_init();
     AcquireSRWLockShared(&poll_lock);
     if (left) *left = polled.left;
     if (right) *right = polled.right;
@@ -232,6 +245,7 @@ void mu3_io_get_gamebtns(uint8_t *left, uint8_t *right)
 void mu3_io_get_lever(int16_t *lever)
 {
     if (!lever) return;
+    ensure_init();
     AcquireSRWLockShared(&poll_lock);
     *lever = mu3_lever_convert(polled.raw_lever, &lever_cfg);
     ReleaseSRWLockShared(&poll_lock);

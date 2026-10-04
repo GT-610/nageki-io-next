@@ -29,4 +29,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Lever test compile failed: exit $LASTEXITCODE" }
     & (Join-Path $build 'lever_tests.exe')
     if ($LASTEXITCODE -ne 0) { throw "Lever tests failed: exit $LASTEXITCODE" }
+    # hid_device.c pulls in SetupAPI and HID, so this one needs those libs.
+    & $compiler /nologo /W4 /WX /wd5105 /std:c11 "/Fe:$(Join-Path $build 'hid_pack_tests.exe')" (Join-Path $root 'src\hid_device.c') (Join-Path $root 'tests\hid_pack_tests.c') "/link" setupapi.lib hid.lib
+    if ($LASTEXITCODE -ne 0) { throw "HID marshalling test compile failed: exit $LASTEXITCODE" }
+    & (Join-Path $build 'hid_pack_tests.exe')
+    if ($LASTEXITCODE -ne 0) { throw "HID marshalling tests failed: exit $LASTEXITCODE" }
 } finally { Pop-Location }

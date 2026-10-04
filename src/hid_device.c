@@ -129,19 +129,40 @@ static int transfer(mu3_hid_device *dev, HANDLE handle, bool write,
     return 1;
 }
 
-/* Normalise a wire report into the 65-byte frame the core parses: byte 0 is the
- * report ID, bytes 1..64 the payload. This is exactly what the frozen DLL did
- * (ReadFile into a 65-byte buffer, then skip byte 0 and marshal the remaining 64
- * bytes as OutputData). A device that reports no report ID is shifted instead. */
-static void normalise(const uint8_t *raw, size_t got, uint8_t frame[MU3_HID_WIRE])
+/* Marshal the fixed 65-byte frame onto the wire. A descriptor reporting 65
+ * carries the Report ID as byte 0; one reporting 64 carries payload only, so
+ * the ID byte is dropped rather than shifting the payload. Sending all 65
+ * bytes to a 64-byte device would put the ID byte where payload belongs and
+ * shift the last payload byte out entirely, which mis-drives the lights. */
+void mu3_hid_pack(const uint8_t frame[MU3_HID_WIRE], uint8_t *wire, size_t wire_len)
+{
+    if (wire == NULL || frame == NULL || wire_len == 0) return;
+    if (wire_len >= MU3_HID_WIRE) {
+        wire[0] = frame[0];
+        memcpy(wire + 1, frame + 1, MU3_HID_PAYLOAD);
+        if (wire_len > MU3_HID_WIRE) {
+            memset(wire + MU3_HID_WIRE, 0, wire_len - MU3_HID_WIRE);
+        }
+    } else {
+        size_t payload = wire_len < MU3_HID_PAYLOAD ? wire_len : MU3_HID_PAYLOAD;
+        memcpy(wire, frame + 1, payload);
+        if (wire_len > payload) memset(wire + payload, 0, wire_len - payload);
+    }
+}
+
+/* Inverse of mu3_hid_pack. This is exactly what the frozen DLL did: ReadFile
+ * into a 65-byte buffer, then skip byte 0 and treat the remaining 64 bytes as
+ * the payload. A device that reports no Report ID has one supplied as 0. */
+void mu3_hid_unpack(const uint8_t *wire, size_t got, uint8_t frame[MU3_HID_WIRE])
 {
     memset(frame, 0, MU3_HID_WIRE);
+    if (wire == NULL) return;
     if (got >= MU3_HID_WIRE) {
-        frame[0] = raw[0];
-        memcpy(frame + 1, raw + 1, MU3_HID_PAYLOAD);
+        frame[0] = wire[0];
+        memcpy(frame + 1, wire + 1, MU3_HID_PAYLOAD);
     } else {
         frame[0] = 0;
-        memcpy(frame + 1, raw, got < MU3_HID_PAYLOAD ? got : MU3_HID_PAYLOAD);
+        memcpy(frame + 1, wire, got < MU3_HID_PAYLOAD ? got : MU3_HID_PAYLOAD);
     }
 }
 
@@ -154,35 +175,37 @@ static DWORD WINAPI worker(void *context)
         if (dev->tick) dev->tick(dev->ctx);
         handle = find_device(&in_len, &out_len);
         if (handle == INVALID_HANDLE_VALUE) { WaitForSingleObject(dev->stop, RETRY_MS); continue; }
-        dev->in_len = in_len;
-        dev->out_len = out_len;
         dev->state(dev->ctx, true);
         while (!stopping(dev)) {
             uint8_t raw[MU3_HID_MAX_REPORT];
             uint8_t frame[MU3_HID_WIRE];
             uint8_t output[MU3_HID_WIRE];
+            uint8_t wire[MU3_HID_MAX_REPORT];
             bool pending;
             size_t count = 0;
+            size_t write_len;
             if (dev->tick) dev->tick(dev->ctx);
             AcquireSRWLockExclusive(&dev->queue_lock);
             pending = dev->pending;
             if (pending) { memcpy(output, dev->queued, sizeof(output)); dev->pending = false; }
             ReleaseSRWLockExclusive(&dev->queue_lock);
-            /* Writes use the descriptor's output length; the queued frame is the
-             * frozen 65-byte layout with report ID 0 at byte 0. */
-            if (pending && transfer(dev, handle, true, output,
-                                    out_len <= sizeof(output) ? out_len : sizeof(output), &count) != 1) break;
+            /* Size the write from the descriptor, but marshal the frame so the
+             * byte layout matches the device's report length. */
+            write_len = out_len <= sizeof(wire) ? out_len : sizeof(wire);
+            if (pending) {
+                mu3_hid_pack(output, wire, write_len);
+                if (transfer(dev, handle, true, wire, write_len, &count) != 1) break;
+            }
             {
                 int result = transfer(dev, handle, false, raw, in_len, &count);
                 if (result < 0 || stopping(dev)) break;
                 if (result == 0) continue; /* Idle read: never expire held input. */
             }
-            normalise(raw, count, frame);
+            mu3_hid_unpack(raw, count, frame);
             dev->frame(dev->ctx, frame, MU3_HID_WIRE, GetTickCount64());
         }
         dev->state(dev->ctx, false);
         CloseHandle(handle);
-        dev->in_len = dev->out_len = 0;
         AcquireSRWLockExclusive(&dev->queue_lock);
         dev->pending = false;
         ReleaseSRWLockExclusive(&dev->queue_lock);

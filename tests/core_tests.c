@@ -45,9 +45,10 @@ int main(void)
 
     /* REGRESSION: a held report must survive an arbitrarily long quiet period.
      * A change-triggered controller sends nothing while nothing moves; expiring
-     * on a timer would silently release held buttons. */
-    assert(mu3_core_age_ms(&core, 100) == 0);
-    assert(mu3_core_age_ms(&core, 60100) == 60000);
+     * on a timer would silently release held buttons. The reported frame still
+     * carries its original timestamp, which is what an age-based check would
+     * have tripped over. */
+    assert(sample.received_ms == 100);
     assert(mu3_core_snapshot(&core, &sample, &health));
     assert(health == MU3_FRESH && sample.left == 0x15 && sample.sequence == 1);
     assert(mu3_core_snapshot(&core, &sample, &health));

@@ -3,9 +3,10 @@
 #include <windows.h>
 #include <stdint.h>
 #include <stdbool.h>
-/* Reports are at most 65 bytes on the wire (Report ID + 64-byte payload) for
- * this controller, but the descriptor decides the exact transfer length, so
- * transfers are sized from HIDP_CAPS rather than assumed. */
+/* The frame this DLL exchanges with the core is always 65 bytes: a Report ID
+ * byte followed by a 64-byte payload. That is a fixed internal layout; the
+ * device's descriptor decides how many bytes actually cross the wire, so
+ * transfers are sized from HIDP_CAPS and marshalled at the boundary. */
 #define MU3_HID_MAX_REPORT 512u
 #define MU3_HID_PAYLOAD 64u
 #define MU3_HID_WIRE 65u
@@ -20,12 +21,16 @@ typedef struct mu3_hid_device {
     mu3_hid_frame_fn frame;
     mu3_hid_state_fn state;
     void (*tick)(void *);
-    /* Lengths reported by the opened device's descriptor. */
-    size_t in_len, out_len;
 } mu3_hid_device;
 bool mu3_hid_start(mu3_hid_device *dev, void *ctx, mu3_hid_frame_fn frame, mu3_hid_state_fn state, void (*tick)(void *));
 /* Stop only during orderly teardown; never from DllMain. */
 void mu3_hid_stop(mu3_hid_device *dev);
 /* Coalesce to the most recent color frame; never blocks on USB. */
 void mu3_hid_queue(mu3_hid_device *dev, const uint8_t report[MU3_HID_WIRE]);
+/* Marshalling between the fixed 65-byte frame and a descriptor's transfer
+ * length. A device whose reports carry no Report ID uses length 64, so the
+ * frame's ID byte is dropped on write and re-supplied as 0 on read. Pure
+ * functions so the mapping can be tested without a device. */
+void mu3_hid_pack(const uint8_t frame[MU3_HID_WIRE], uint8_t *wire, size_t wire_len);
+void mu3_hid_unpack(const uint8_t *wire, size_t got, uint8_t frame[MU3_HID_WIRE]);
 #endif

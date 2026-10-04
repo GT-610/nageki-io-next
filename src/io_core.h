@@ -57,10 +57,9 @@ bool mu3_core_publish(mu3_core *core, const uint8_t *report, size_t size,
 /* Device removed: input becomes neutral until the next open/publish. */
 void mu3_core_disconnect(mu3_core *core);
 /* Returns false and zeroes output only when the device is not connected or no
- * report has ever arrived. A held report is returned no matter how old it is. */
+ * report has ever arrived. A held report is returned no matter how old it is.
+ * There is deliberately no age accessor: report age must never influence
+ * validity, and a caller that could read it would be tempted to. */
 bool mu3_core_snapshot(mu3_core *core, mu3_sample *out, mu3_health *health);
-/* Milliseconds since the held report arrived, or 0 when none is held.
- * Diagnostics only: callers must not use this to drop input. */
-uint64_t mu3_core_age_ms(mu3_core *core, uint64_t now_ms);
 
 #endif

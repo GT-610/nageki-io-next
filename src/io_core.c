@@ -97,17 +97,3 @@ bool mu3_core_snapshot(mu3_core *core, mu3_sample *out, mu3_health *health)
     ReleaseSRWLockExclusive(&core->lock);
     return valid;
 }
-
-uint64_t mu3_core_age_ms(mu3_core *core, uint64_t now_ms)
-{
-    uint64_t age = 0;
-    if (core == NULL) {
-        return 0;
-    }
-    AcquireSRWLockShared(&core->lock);
-    if (core->have_frame && now_ms >= core->latest.received_ms) {
-        age = now_ms - core->latest.received_ms;
-    }
-    ReleaseSRWLockShared(&core->lock);
-    return age;
-}
