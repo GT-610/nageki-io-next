@@ -44,10 +44,12 @@ int main(void)
     assert(sample.card[0] == 0xAA && sample.operator_buttons == 4);
 
     /* REGRESSION: a held report must survive an arbitrarily long quiet period.
-     * A change-triggered controller sends nothing while nothing moves; expiring
-     * on a timer would silently release held buttons. The reported frame still
-     * carries its original timestamp, which is what an age-based check would
-     * have tripped over. */
+     * A newer report is the only thing allowed to supersede one, because a
+     * button or a lever-at-stop must stay in effect while it is held. The held
+     * frame still carries its original timestamp, which is what an age-based
+     * check would have tripped over. (The deployed controller actually streams
+     * at about 200 reports/s, so this guards the rule rather than the common
+     * path.) */
     assert(sample.received_ms == 100);
     assert(mu3_core_snapshot(&core, &sample, &health));
     assert(health == MU3_FRESH && sample.left == 0x15 && sample.sequence == 1);

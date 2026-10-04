@@ -7,25 +7,31 @@
 #define PID 0x8036
 #define RETRY_MS 500
 /* How long one read blocks before the loop re-checks the LED queue and refreshes
- * the liveness heartbeat. A change-triggered controller sends nothing while the
- * lever and buttons are still, so an idle read always runs to this timeout.
+ * the liveness heartbeat.
  *
- * The frozen DLL waited 1000 ms here, which also meant an LED frame queued just
- * after a read began was not written until that read finished: up to a second of
- * visible lag on the button lights, and about half a second on average. A read
- * timeout never invalidates input (see io_core.h), and the HID class driver
- * queues reports that arrive while no read is outstanding, so shortening the
- * tick only costs a few extra wakeups. */
+ * Measured on the deployed controller (hid_probe.exe jitter 30000): it streams
+ * continuously at about 200 reports/s, 5986 reports in 30 s with the lever
+ * untouched. A read therefore returns in about 5 ms while the controller is
+ * healthy, and this timeout is never reached. It only matters when the device
+ * has gone quiet, and in that state its only jobs are to bound how long a queued
+ * LED frame waits and to keep the heartbeat fresh; neither needs anything close
+ * to the frozen DLL's 1000 ms. It is deliberately not used to decide whether
+ * input is valid (see io_core.h). */
 #define READ_TICK_MS 50
 /* A write is a real transfer rather than a poll, so it keeps 1000 ms. */
 #define WRITE_TIMEOUT_MS 1000
 /* After a report arrives, keep reading without waiting and keep only the newest.
- * A backlog builds whenever this process is not scheduled promptly (game
- * start-up, a scene change, a contended CPU) or the controller streams faster
- * than the game polls. Delivering that backlog in order would walk the game
- * through lever and button states that are already stale, which for a rhythm
- * game is the difference between a hit and a miss. The bound keeps a
- * continuously streaming device from starving the rest of the loop. */
+ * This is the live case, not a hypothetical one: the controller reports at about
+ * 200 reports/s while the game polls far less often, so reports are continuously
+ * queued and every one but the last is already superseded by the time it is
+ * read. A backlog also builds whenever this process is not scheduled promptly
+ * (game start-up, a scene change, a contended CPU). Delivering that backlog in
+ * order would walk the game through lever and button states that are already
+ * stale, which for a rhythm game is the difference between a hit and a miss.
+ * The game reads the current level through mu3_io_get_gamebtns/mu3_io_get_lever,
+ * so a discarded report carries no information it could have observed. The
+ * bound stops the drain from occupying the loop and starving the LED write
+ * above. */
 #define DRAIN_MAX 8u
 
 static bool stopping(mu3_hid_device *dev) { return WaitForSingleObject(dev->stop, 0) == WAIT_OBJECT_0; }
@@ -239,12 +245,14 @@ static DWORD WINAPI worker(void *context)
             }
             result = transfer(dev, handle, false, raw, in_len, READ_TICK_MS, &count);
             if (result < 0 || stopping(dev)) break;
-            if (result == 0) continue; /* Idle read: never expire held input. */
-            /* A report arrived, so more are probably queued behind it. Keep
-             * reading without waiting and let each one overwrite the last: only
-             * the newest state is ever delivered, which removes the backlog the
-             * game would otherwise be walked through. The bound stops a device
-             * that streams continuously from starving the LED write above. */
+            /* Timeout: the device is open but silent. Nothing expires a held
+             * report (see io_core.h), so just loop. A healthy controller streams
+             * at about 200 reports/s and does not reach here. */
+            if (result == 0) continue;
+            /* The controller streams continuously, so more reports are queued
+             * behind this one. Keep reading without waiting and let each one
+             * overwrite the last: only the newest state is ever delivered, which
+             * removes the backlog the game would otherwise be walked through. */
             while (drained < DRAIN_MAX) {
                 size_t more = 0;
                 if (transfer(dev, handle, false, raw, in_len, 0, &more) != 1) break;

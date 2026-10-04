@@ -37,9 +37,11 @@ $ini = Join-Path $stage 'MU3CustomIO.ini.txt'
     'lever_neutral=1024        raw value at the stick''s electrical centre.'
     'lever_sensitivity=2       1..4; 2 is the deployed baseline.'
     ''
-    'Captured on this controller: left 0x032A, rest 0x0402, right 0x04A4.'
-    'The electrical centre is 0x0400, so lever_neutral=1024 gives exactly'
-    '0000H at centre; at rest (0x0402) it reads 0x0080.'
+    'Captured on this controller: left 0x032A, right 0x04A4. The electrical'
+    'centre is 0x0400, so lever_neutral=1024 gives exactly 0000H there.'
+    'The resting value is NOT the centre: the stick cannot be parked exactly'
+    'at it, so it reads wherever it is left (1026 and 1035 were both seen).'
+    'Do not set lever_neutral from a resting reading.'
     'Set lever_neutral=0 to reproduce the original DLL''s uncentred output.'
 ) | Set-Content -Encoding ascii -LiteralPath $ini
 
@@ -55,9 +57,12 @@ $probeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stage 'hid
     "",
     "Verified against a real capture of THIS controller (hid_probe.exe dump):",
     "  report id byte = 0x00; lever field = report bytes 11..12 little-endian",
-    "  full left 0x032A (810)   rest 0x0402 (1026)   full right 0x04A4 (1188)",
+    "  full left 0x032A (810)   full right 0x04A4 (1188)",
     "  -> electrical centre lever_neutral = 1024 (0x400)",
     "  -> travel 378 counts; excursions from centre -214 (left) / +164 (right)",
+    "  The resting reading is not a hardware constant: the stick cannot be",
+    "  parked exactly at centre (1026 and 1035 both observed). Do not set",
+    "  lever_neutral from it.",
     "",
     "Lever centre is now subtracted before scaling. At the default sensitivity",
     "2 this is bit-identical to the original DLL; it removes the odd/even",
@@ -65,13 +70,13 @@ $probeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stage 'hid
     "Tune with MU3CustomIO.ini (see MU3CustomIO.ini.txt); set lever_neutral=0",
     "to reproduce the original uncentred output instead.",
     "",
-    "Reading is now 50 ms per wait instead of 1000 ms, so queued LED frames go",
-    "out promptly, and a burst of reports is coalesced to the newest one so the",
-    "game is never walked through already-stale lever and button states.",
+    "The controller streams continuously at about 200 reports/s (measured:",
+    "5986 reports in 30 s with the lever untouched, all one value). So the",
+    "input is never at risk from a read timeout, and a noise gate is not",
+    "warranted: the reading has a spread of 0 counts.",
     "",
-    "hid_probe.exe jitter <ms> measures how steady the lever reads with the",
-    "stick untouched. Run it before considering a noise gate: a spread of 0-1",
-    "counts means none is warranted.",
+    "hid_probe.exe jitter <ms> reproduces that measurement. Run it before",
+    "considering a noise gate or touching lever_neutral.",
     "",
     "Still NOT verified on hardware: buttons/scan/card/LED mapping, in-game",
     "fault display, amdaemon.exe being the sole HID owner."

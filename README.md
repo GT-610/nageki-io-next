@@ -45,9 +45,13 @@ Building with `/DMU3_IO_REPORT_DISCONNECT` makes poll return `HRESULT_FROM_WIN32
 
 ## Input validity
 
-Device connection decides whether input is valid. Once the device connects and one valid report arrives, that report stays in effect until the device goes away, however much time passes. A change-triggered controller sends nothing while the lever and buttons are still, so expiring a report on a timer would release held inputs.
+Device connection decides whether input is valid. Once the device connects and one valid report arrives, that report stays in effect until a newer one supersedes it or the device goes away, however much time passes. A newer report is the only thing that may replace one, because a lever at a stop or a button held down has to stay in effect while it is held.
 
-Across processes the same rule holds. Shared memory under `Local\MU3CustomIO-v1` carries a `published_ms` heartbeat that the HID worker refreshes on every tick, and only that heartbeat signals whether the owning process is alive. Report age is never consulted. An absent owner is detected primarily by the process handle: the reader opens the owner PID with `OpenProcess` and finds it unopenable or already signalled, which is immediate. The five-second heartbeat window is a backstop for a reused PID or a stale mapping. An idle worker ticks every 50 ms, so that window is over a hundred missed ticks wide, which is deliberate: the condition worth detecting is `amdaemon.exe` actually vanishing, and widening the window costs nothing real while narrowing it under a scheduler stall or a suspended process would drop input that is still live. Both disconnect and reconnect clear the stored sample, so a stale button or card cannot be replayed.
+Measurements from the deployed controller (`hid_probe.exe jitter 30000`) show it streams continuously at about 200 reports/s, 5986 reports in 30 s with the lever untouched. So in practice a fresh report always arrives within milliseconds and the rule above is a fallback rather than the normal path. It also means a silent device is detectable on this hardware; a genuinely change-triggered device would make silence indistinguishable from stillness.
+
+One consequence is worth stating. If the firmware stalls while the device stays enumerated, the handle remains open, no read fails and no report arrives, so input freezes at the last report rather than releasing — a stuck button would stay stuck. A silence threshold would detect that, and the 200 reports/s measurement is what would make one safe to choose; it is not implemented, because doing so would reinstate the age-based invalidation the rule above exists to avoid for genuinely held input.
+
+Across processes the same rule holds. Shared memory under `Local\MU3CustomIO-v1` carries a `published_ms` heartbeat that the HID worker refreshes on every tick, and only that heartbeat signals whether the owning process is alive. Report age is never consulted. An absent owner is detected primarily by the process handle: the reader opens the owner PID with `OpenProcess` and finds it unopenable or already signalled, which is immediate. The five-second heartbeat window is a backstop for a reused PID or a stale mapping. A silent worker still ticks every 50 ms and a streaming one ticks far faster, so that window is hundreds of missed ticks wide, which is deliberate: the condition worth detecting is `amdaemon.exe` actually vanishing, and widening the window costs nothing real while narrowing it under a scheduler stall or a suspended process would drop input that is still live. Both disconnect and reconnect clear the stored sample, so a stale button or card cannot be replayed.
 
 ## Report layout
 
@@ -82,6 +86,8 @@ A capture from the deployed controller (`hid_probe.exe dump`) reads the lever fi
 | full left | `0x032A` (810) |
 | rest | `0x0402` (1026) |
 | full right | `0x04A4` (1188) |
+
+The two end stops are set by the mechanism and repeat. The resting value is not: the stick cannot be parked exactly at the electrical centre, so it reads wherever it happens to be left, and a later `jitter` run on the same controller read 1035 instead of 1026. Only `neutral` is a hardware constant; the rest reading is one observation of stick position.
 
 The electrical centre is `0x0400` (1024), so the build subtracts it:
 
@@ -133,9 +139,9 @@ The DLL matches on VID `2341` and PID `8036`. It does not constrain report lengt
 
 Reports are marshalled between this DLL's fixed 65-byte frame and whatever length the descriptor reports. A device reporting 64 carries payload only, so the frame's Report ID byte is dropped on write and supplied as 0 on read; writing all 65 bytes to such a device would place the ID byte where payload belongs, shift everything by one and drop the last payload byte, which mis-drives the lights rather than failing visibly. Devices reporting more than 65 are zero-padded. `tests/hid_pack_tests.c` covers these mappings.
 
-A read waits at most 50 ms before the loop starts over, so a queued LED frame goes out promptly and the liveness heartbeat stays fresh; a write still waits 1000 ms. A controller that is still sends nothing, so an idle read always runs to that timeout, which affects only how quickly the lights react (up to 1000 ms before) and plays no part in deciding whether input is valid.
+A read waits at most 50 ms before the loop starts over; a write still waits 1000 ms. The deployed controller streams at about 200 reports/s, so a read returns in roughly 5 ms and that timeout is only reached when the device has gone quiet, where its only jobs are bounding how long a queued LED frame waits and keeping the heartbeat fresh. It never decides whether input is valid.
 
-After a report arrives, the loop keeps reading without waiting and delivers only the newest one. A backlog builds whenever this process is not scheduled promptly (game start-up, a scene change, a contended CPU) or the controller reports faster than the game polls, and feeding that backlog through in order would walk the game through lever and button states that are already stale. The drain is bounded at eight reports so a continuously streaming device cannot occupy the loop.
+The controller currently reports about 200 times per second while the game polls far less often, so reports are continuously queued and every one but the last is already superseded by the time it is read. The loop therefore keeps reading without waiting and delivers only the newest report, bounded at eight. Feeding the queue through in order would walk the game through lever and button states that are already stale. The game reads the current level through `mu3_io_get_gamebtns` and `mu3_io_get_lever`, so a discarded report carries no information it could have observed.
 
 ## Card reader
 
@@ -154,7 +160,9 @@ hid_probe.exe jitter 30000
 
 Run it on the machine the controller is plugged into. Press and release one button at a time; the byte that changes belongs to that button. Push the lever to both stops to read the real range. A capture from the deployed controller has already fixed the report ID, the lever field and its centre; the button, scan and card offsets in this DLL still come from inference, so the probe is what turns them into measurements.
 
-`jitter` answers a different question: how steady is the reading when nobody is touching the lever. A change-triggered controller sends nothing while the stick is still, so the reports that do arrive during that period are the ones electrical noise produced. It prints the arrival rate, the minimum, maximum and spread, and a histogram of values around 1024. A spread of 0 or 1 counts means the reading is already quiet and a noise gate would only suppress genuine slow movement; a larger spread is what would justify one, with the threshold set near the observed spread. The histogram window is 32 counts either side of 1024, and samples outside it are counted separately because that is the lever being moved rather than noise.
+`jitter` measures how steady the reading is when nobody is touching the lever, which is what decides whether a noise gate is worth having. It prints the arrival rate, the minimum, maximum and spread, and a histogram of values around 1024. On the deployed controller the result was 5986 reports in 30 s (about 200 reports/s) all reading the same value, a spread of 0, so a noise gate is not warranted: it would only suppress genuine slow movement. The histogram window is 32 counts either side of 1024, and samples outside it are counted separately because that is the lever being moved rather than noise.
+
+`jitter` also prints the resting value and its offset from 1024. That offset is **not** a drift measurement and **not** a calibration: the stick is mechanical and cannot be parked exactly at the electrical centre, so it rests wherever it happens to rest. The deployed controller read 1035 at rest (+11, about 704 units of lever output at sensitivity 2), and an earlier capture of the same controller read 1026 (+2). Those are two different stick positions, not a change in the hardware, and neither is grounds for adjusting `lever_neutral`. What the spread and histogram do establish is that the reading is stable and exactly reproducible while the stick is untouched.
 
 ## Deployment
 

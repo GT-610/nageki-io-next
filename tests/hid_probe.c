@@ -198,16 +198,24 @@ static int lever_from(const uint8_t *buf, DWORD got, size_t in_len, int *value)
 
 /* How still is the lever when nobody is touching it?
  *
- * A change-triggered controller sends nothing while the stick is still, so the
- * reports that do arrive with the stick untouched are exactly the ones the
- * electrical noise produced. This measures how often those reports arrive and
- * how far the reading wanders. A spread of 0 or 1 counts means a noise gate
- * would suppress real movement rather than noise.
+ * The deployed controller streams continuously (about 200 reports/s with the
+ * lever untouched), so this measures the full distribution of the reading while
+ * the stick is at rest, not a sample of "reports that only appeared because
+ * something moved". It reports how often reports arrive and how far the reading
+ * wanders, which is what decides whether a noise gate is worth having: a spread
+ * of 0 or 1 counts means the reading is already quiet and a gate would only
+ * suppress genuine slow movement.
  *
- * The histogram is centred on the nominal 1024 and covers +/-32 counts, which
- * is far wider than any plausible noise floor yet still distinguishes "sits on
- * one value" from "wanders over a dozen". Anything outside that window is
- * counted separately, because that is the lever being moved, not noise. */
+ * It also settles a question the DLL's setting depends on: what a hand-off
+ * reading actually is. The stick is mechanical and cannot be parked exactly at
+ * the electrical centre, so a resting reading carries a real offset from it and
+ * must not be read as the centre or as drift. The observation that matters is
+ * that the offset is stable and exactly reproducible while the stick is
+ * untouched, which is what the spread and the histogram show.
+ *
+ * The histogram is centred on the nominal 1024 and covers +/-32 counts.
+ * Anything outside that window is counted separately, because that is the lever
+ * being moved rather than noise. */
 #define JITTER_WINDOW 32
 static int measure_jitter(int ms)
 {
@@ -283,6 +291,15 @@ static int measure_jitter(int ms)
                max - min, (max - min) * 64);
         puts("of lever output of pure noise, against about 13696 for full left");
         puts("travel. A noise gate of about that spread would absorb it.");
+    }
+    if (last >= 0) {
+        printf("\nResting value here is %d, i.e. %+d from the nominal centre 1024\n",
+               last, last - 1024);
+        puts("(about 64 units of lever output per count at sensitivity 2). This is");
+        puts("NOT a drift measurement and NOT a calibration: the stick is mechanical");
+        puts("and cannot be parked exactly at the electrical centre, so the offset is");
+        puts("whatever position it happens to rest in. What the numbers above do show");
+        puts("is that it is stable and reproducible while untouched.");
     }
     return 0;
 }

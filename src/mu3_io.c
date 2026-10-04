@@ -31,18 +31,20 @@ typedef struct shared_frame {
     uint8_t led_report[65];
 } shared_frame;
 /* A live owner refreshes published_ms on every worker tick. This is
- * deliberately independent of report age: a change-triggered controller sends
- * nothing while idle, and that must not look like a dead owner.
+ * deliberately independent of report age: the heartbeat reports whether the
+ * owning process is alive, and a controller that has gone quiet must not look
+ * like a dead owner.
  *
  * Sizing: an idle worker blocks in the read for READ_TICK_MS (50 ms) and ticks
  * once per loop, so the heartbeat interval is about 50 ms even with the
- * controller idle. This window is therefore over a hundred missed ticks wide,
- * generous on purpose. The condition worth detecting is amdaemon.exe actually
- * vanishing, which is catastrophic and carries no latency requirement, and the
- * process handle below detects that immediately anyway; this window only
- * backstops a reused PID or a stale mapping. Widening it further costs nothing
- * real, while narrowing it under a scheduler stall or a suspended process would
- * drop input that is still live. */
+ * controller silent; while the controller streams (about 200 reports/s) it is
+ * far faster. This window is therefore hundreds of missed ticks wide, generous
+ * on purpose. The condition worth detecting is amdaemon.exe actually vanishing,
+ * which is catastrophic and carries no latency requirement, and the process
+ * handle below detects that immediately anyway; this window only backstops a
+ * reused PID or a stale mapping. Widening it further costs nothing real, while
+ * narrowing it under a scheduler stall or a suspended process would drop input
+ * that is still live. */
 #define MU3_OWNER_LIVENESS_MS 5000u
 static LONG last_led_sequence;
 static SRWLOCK led_lock = SRWLOCK_INIT;
