@@ -63,85 +63,69 @@ Reports are 65 bytes: one report ID byte followed by a 64-byte payload.
 
 A button byte counts as pressed when it is nonzero, so a device reporting `0x00`/`0xFF` behaves like one reporting 0/1. A scan value of anything except 1 or 2 means no card, and the rest of that report is still used.
 
-These offsets come from protocol analysis of an existing implementation and have not been checked against a captured report. `hid_probe.exe` is the way to confirm them.
+A capture with `hid_probe.exe dump` confirms the report ID byte, which is `0x00`, and the lever field at bytes 11-12 little-endian, matching payload offsets 10-11. The button, scan, card and operator offsets still come from protocol analysis of an existing implementation and have not been checked against a capture; `hid_probe.exe` is how to confirm them.
 
 ## Lever conversion
 
-`src/lever.c` holds the conversion:
+`src/lever.c` holds the conversion. The original formula was:
 
 ```
 lever = (short)( LeverOffset * 100 + raw * 32 * LeverSensitivity )
 ```
 
-The defaults are `LeverSensitivity = 1` and `LeverOffset = 0`. There is no clamp, and the `(short)` narrowing wraps modulo 65536. The current build sets sensitivity 2, giving a scale of `raw * 64`.
+with defaults `LeverSensitivity = 1` and `LeverOffset = 0`, no clamp, and the `(short)` narrowing wrapping modulo 65536. It subtracts no centre, which assumes the firmware reports zero with the stick centred.
 
-Measured on a cabinet at sensitivity 2, the calibration display reads `0000H` at centre, `B0FFH` at the left stop and `557FH` at the right stop. Dividing out the scale puts raw at roughly -316 and +342 either side of zero.
+A capture from the deployed controller (`hid_probe.exe dump`) reads the lever field directly:
 
-| Position | Displayed | raw | `raw * 64` |
-|---|---|---|---|
-| left | `B0FFH` | about -316 | `B100H` (-20224) |
-| centre | `0000H` | 0 | `0000H` |
-| right | `557FH` | about +342 | `5580H` (+21888) |
-
-`B100H` and `5580H` bracket the readings, which are approximate because neither displayed value divides by 64. The sign convention, negative at the left with the high bit set, matches the range `mu3io.h` documents for a real cabinet, near `0xB000` left and `0x5000` right. `tests/lever_tests.c` uses these three readings as regression input.
-
-Only the low 10 bits of raw affect the result. Since `1024 * 64 = 65536`, raw `0x0400` wraps to zero output. This follows from the original formula, where a 10-bit ADC scaled by 32 fills 16 bits and doubling the sensitivity wraps twice. It is not a defect, but it does mean the formula cannot describe raw values much beyond ±512.
-
-### Odd sensitivities put centre at half scale
-
-At even sensitivity the lever centres correctly. At odd sensitivity the centre reads half scale.
-
-The formula subtracts no zero offset, so it assumes raw is zero at centre. Combined with the wrap, the centre output is:
-
-```
-C * 32 * sens  (mod 65536)  =  32768 * sens  (mod 65536)
-```
-
-| sens | centre output |
+| Position | raw |
 |---|---|
-| 1, 3, 5, ... | `0x8000` |
+| full left | `0x032A` (810) |
+| rest | `0x0402` (1026) |
+| full right | `0x04A4` (1188) |
+
+The electrical centre is `0x0400` (1024), so the build subtracts it:
+
+```
+lever = (short)( (raw - neutral) * 32 * sensitivity ),   neutral = 1024
+```
+
+### Why the centre is subtracted
+
+At centre the output becomes `(C - C) * 32 * sens = 0` at every sensitivity. The original produced `C * 32 * sens (mod 65536)`, which reaches zero only when `C * sens` is a multiple of 2048:
+
+| sensitivity | original centre output |
+|---|---|
+| 1, 3, 5, ... | `0x8000` (half scale) |
 | 2, 4, 6, ... | `0x0000` |
 
-Centre reaches zero exactly when `C * sens` is a multiple of 2048. Since 2048 is 2^11, let v2(n) be the number of factors of two in n:
+Since 2048 is 2^11, an even sensitivity centres when `v2(C) >= 10` and an odd one when `v2(C) >= 11`. Both conditions together force `v2(C) = 10`, so `C = 1024 * odd`. The probe picks 1024: the only other candidate in the 10-bit range, 3072, sits 2046 counts from the measured rest value.
 
-- even sens needs `v2(C) >= 10`
-- odd sens needs `v2(C) >= 11`, because an odd number shares no factor of two with 2^11
+At the deployed sensitivity 2 the centred conversion is bit-identical to the original for every raw value. The two differ by `1024 * 32 * sens`, a multiple of 65536 exactly when the sensitivity is even, and `tests/lever_tests.c` asserts this across all 65536 inputs. What the change buys is the odd sensitivities, which become usable.
 
-Both conditions together force `v2(C) = 10`:
+### Range and sensitivity limit
 
-```
-C = 1024 * odd = 0x400, 0xC00, 0x1400, ...
-```
+Travel is about 378 counts, 810 to 1188, so the largest excursion from centre is 214 counts. Keeping `excursion * 32 * sens` inside the positive half of a signed 16-bit value caps the sensitivity at 4, since `214 * 32 * 5 = 34240` wraps negative. `MU3_LEVER_SENSITIVITY_MAX` is 4.
 
-The conclusion is forced. Were C zero, both parities would centre correctly; were C `0x800`, both would as well. Each contradicts the observation.
+Only the low 10 bits of the centred value affect the result, because `1024 * 64 = 65536` at sensitivity 2. This follows from the original formula rather than being a defect of this implementation.
 
-So the firmware reports a nonzero centre and the formula never subtracts it. An even sensitivity multiplies that offset into a whole number of wraps, which hides it. Both parities come from the same defect, and the even setting is the one that happens to be self-consistent.
+### Tuning
 
-### Range
-
-At sensitivity 2 the stops sit about 316 counts left and 342 counts right of centre, a travel of roughly 658 counts. The 26-count difference between the two sides is ordinary, since the mechanical centre of a potentiometer need not match its electrical centre. With C = 1024, raw runs from about 708 to 1366.
-
-### Sensitivity limit
-
-The positive half of a signed 16-bit value ends at 32767, so half the travel multiplied by 32 and by the sensitivity has to stay below that. At the right stop, 342 * 32 = 10944, which caps the sensitivity at 2.99.
-
-Sensitivity 2 is therefore the ceiling. At sensitivity 3 the right stop reaches 342 * 96 = 32832, which wraps negative, and pushing the lever fully right throws it to the opposite end. This is why only the even settings are usable.
-
-### Proposed change
-
-Subtracting the centre before scaling removes the parity problem and centres exactly:
+`MU3CustomIO.ini` beside the DLL overrides the defaults:
 
 ```
-lever = (raw - 1024) * 64
+lever_neutral=1024
+lever_sensitivity=2
 ```
 
-The centre then evaluates to `(C - C) * 32 * sens = 0` at any sensitivity, and the headroom rises to about sensitivity 5. This is not implemented yet.
+`lever_neutral` takes 0..65535 and `lever_sensitivity` takes 1..4. A missing file, or a partly invalid one, keeps the defaults; a missing key keeps the value already in effect. Setting `lever_neutral=0` reproduces the original uncentred output. `MU3CustomIO.ini.txt` in the package is a commented template that has to be renamed to take effect. The file lives beside the DLL rather than beside the executables because both `mu3.exe` and `amdaemon.exe` load this one DLL.
 
-### Open question
+### The calibration screen readings
 
-Whether `B0FFH` and `557FH` are the values returned by `mu3_io_get_lever` or the calibration signal `0x7FFF - lever` that segatools passes to the game. `mu3io.h` documents `0xB000` and `0x5000` for a real cabinet, which matches these readings closely and points at the calibration signal, putting raw near -196 to +170. A centre of `0000H` points at the lever value, putting raw near -316 to +342.
+The cabinet's lever calibration screen reads `B0FFH` left and `557FH` right at sensitivity 2. Both are odd, and both are congruent to 63 modulo 64. A lever value is always a multiple of `32 * sensitivity` and therefore even, so neither reading can be one. At sensitivity 2 the scale is 64, so `adcs[0] = 0x7FFF - lever` (`common/board/io4.c:125`) is congruent to 63 modulo 64, which is exactly what the readings show. The screen therefore displays the calibration signal, not the value `mu3_io_get_lever` returns. Inverting it puts raw near 828 and 1194, a span of 366 against the 378 the probe measured directly, a 3% difference.
 
-The scale is `* 64` either way, so the conversion is unaffected and only the expected raw range differs. Reading the lever bytes with `hid_probe.exe` settles it: a span near ±200 indicates the first reading, near ±340 the second.
+That congruence holds when the scale is a multiple of 64, so at sensitivities 2 and 4 and not at 1 or 3, where `adcs` can also be 31 modulo 64. The readings were taken at sensitivity 2.
+
+A centred lever reading `0000H` is the lever output, which is 0 at centre for even sensitivities under both the original and the centred formula. The two readings are different quantities, which is what made them look contradictory.
 
 ## HID matching
 
@@ -160,7 +144,7 @@ hid_probe.exe             list HID devices with VID, PID and caps
 hid_probe.exe dump 30000  open the controller and print only changed reports for 30 s
 ```
 
-Run it on the machine the controller is plugged into. Press and release one button at a time; the byte that changes belongs to that button. Push the lever to both stops to read the real range. The offsets, polarities and lever range in this DLL all come from inference, so the probe is what turns them into measurements.
+Run it on the machine the controller is plugged into. Press and release one button at a time; the byte that changes belongs to that button. Push the lever to both stops to read the real range. A capture from the deployed controller has already fixed the report ID, the lever field and its centre; the button, scan and card offsets in this DLL still come from inference, so the probe is what turns them into measurements.
 
 ## Deployment
 

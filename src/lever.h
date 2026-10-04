@@ -1,34 +1,51 @@
 #ifndef MU3_LEVER_H
 #define MU3_LEVER_H
+#include <stdbool.h>
 #include <stdint.h>
+#include <windows.h>
 
-/* Lever conversion, isolated so it can be tested against measured cabinet
- * values without linking the DLL.
+/* Lever conversion. Kept free of I/O state so it can be tested against real
+ * captured values without loading the DLL.
  *
- * The frozen DLL computed exactly:
- *     lever = (short)(LeverOffset * 100.0 + raw * 32.0 * LeverSensitivity)
- * with LeverOffset = 0 and no clamp (the cast wraps modulo 65536).
+ * The original DLL computed, with offset defaulting to 0 and no clamp:
+ *     lever = (short)( LeverOffset * 100 + raw * 32 * LeverSensitivity )
+ * and the narrowing cast wraps modulo 65536. It never subtracted a centre, so
+ * it implicitly assumed the firmware reported 0 at the stick's centre.
  *
- * Measured on the cabinet with the DLL at LeverSensitivity = 2 (centre,
- * full left, full right as shown by the game's lever calibration):
+ * It does not. A capture from the deployed controller (hid_probe.exe dump)
+ * reads the lever field directly:
+ *     full left 0x032A (810)   at rest 0x0402 (1026)   full right 0x04A4 (1188)
  *
- *     centre 0000H   left B0FFH   right 557FH
+ * The electrical centre is 0x0400 (1024). The probe pins it, and the odd/even
+ * sensitivity behaviour agrees: the original centres only when raw_centre *
+ * sensitivity is a multiple of 2048, and "even works, odd reads 0x8000" forces
+ * v2(raw_centre) == 10, i.e. raw_centre = 1024 * odd. Of the candidates in the
+ * 10-bit range, 1024 is 2 counts from the measured rest value while 3072 is
+ * 2046 away.
  *
- * Those correspond to raw = 0, about -316 and about +342, i.e. raw is a
- * signed count centred on zero. 32 * 2 = 64 reproduces them: raw -316 gives
- * B100H and raw +342 gives 5580H, bracketing the approximate readings, and
- * the sign convention (left negative, high MSB) matches mu3io.h's note that a
- * real cabinet sits near 0xB000 on the left and 0x5000 on the right.
- *
- * So sensitivity 2 is the movement-rate baseline, exactly as the frozen DLL
- * behaved when configured that way. */
-#define MU3_LEVER_SENSITIVITY 2
-#define MU3_LEVER_SCALE (32 * MU3_LEVER_SENSITIVITY)
-#define MU3_LEVER_OFFSET 0
+ * Subtracting the centre removes the odd/even bug and, because the centre no
+ * longer consumes range, allows a higher sensitivity. At the deployed
+ * sensitivity 2 the centred conversion is bit-identical to the original for
+ * every raw value, so this is not a behavioural regression. */
+#define MU3_LEVER_NEUTRAL_DEFAULT 1024
+#define MU3_LEVER_SENSITIVITY_DEFAULT 2
+#define MU3_LEVER_SENSITIVITY_MIN 1
+/* Highest sensitivity that keeps the captured travel monotonic: the largest
+ * excursion from centre is 214 counts, and 214 * 32 * 5 overflows int16. */
+#define MU3_LEVER_SENSITIVITY_MAX 4
 
-/* raw is the device's unsigned 16-bit lever field; the frozen DLL treated it
- * as ushort and relied on the narrowing cast wrapping, which is what the
- * explicit modulo below reproduces portably. */
-int16_t mu3_lever_from_raw(uint16_t raw);
+typedef struct mu3_lever_config {
+    int neutral;     /* raw value at the electrical centre, 0..65535 */
+    int sensitivity; /* integer, same meaning as the original setting */
+} mu3_lever_config;
+
+void mu3_lever_config_defaults(mu3_lever_config *cfg);
+bool mu3_lever_config_valid(const mu3_lever_config *cfg);
+/* Replicates (short)((raw - neutral) * 32 * sensitivity) with the original's
+ * modulo-65536 narrowing. Invalid configs fall back to the defaults. */
+int16_t mu3_lever_convert(uint16_t raw, const mu3_lever_config *cfg);
+/* Optional overrides from the DLL's own INI file. Missing or out-of-range keys
+ * keep the values already in cfg, so a partially edited file is safe. */
+void mu3_lever_config_load(mu3_lever_config *cfg, const wchar_t *path);
 
 #endif

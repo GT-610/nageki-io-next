@@ -21,6 +21,7 @@ static ULONGLONG init_ms;
 #define MU3_DISCONNECT_REPORT_MS 3000u
 #endif
 static volatile LONG owner = 0;
+static mu3_lever_config lever_cfg;
 typedef struct shared_frame {
     volatile LONG sequence;
     DWORD owner_pid;
@@ -94,6 +95,7 @@ static BOOL CALLBACK initialize_once(PINIT_ONCE unused, PVOID param, PVOID *cont
     const wchar_t *filename;
     (void) unused; (void) param; (void) context;
     mu3_core_init(&core, -1); /* Report ID unverified until a descriptor is captured. */
+    mu3_lever_config_defaults(&lever_cfg);
     init_ms = GetTickCount64();
     mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
                                  sizeof(shared_frame), L"Local\\MU3CustomIO-v1");
@@ -102,6 +104,26 @@ static BOOL CALLBACK initialize_once(PINIT_ONCE unused, PVOID param, PVOID *cont
     if (GetModuleFileNameW(NULL, path, MAX_PATH) == 0) return TRUE;
     filename = wcsrchr(path, L'\\');
     filename = filename ? filename + 1 : path;
+    /* Optional overrides live next to the DLL as MU3CustomIO.ini, not next to
+     * the exe: both mu3.exe and amdaemon.exe load this one DLL, so the DLL's
+     * own directory is the one place both processes agree on. A missing or
+     * partial file simply keeps the defaults, so this can never fail a load. */
+    {
+        HMODULE self = NULL;
+        wchar_t dll_path[MAX_PATH];
+        wchar_t *dot;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCWSTR)(const void *)&initialize_once, &self) &&
+            GetModuleFileNameW(self, dll_path, MAX_PATH) != 0) {
+            dot = wcsrchr(dll_path, L'.');
+            if (dot && (size_t)(dot - dll_path) + 5 <= MAX_PATH) {
+                if (wcscpy_s(dot, 5, L".ini") == 0) {
+                    mu3_lever_config_load(&lever_cfg, dll_path);
+                }
+            }
+        }
+    }
     /* segatools also loads this DLL in the game process. One process must
      * own the controller; the game process must never open a second handle. */
     if (_wcsicmp(filename, L"amdaemon.exe") == 0) {
@@ -211,7 +233,7 @@ void mu3_io_get_lever(int16_t *lever)
 {
     if (!lever) return;
     AcquireSRWLockShared(&poll_lock);
-    *lever = mu3_lever_from_raw(polled.raw_lever);
+    *lever = mu3_lever_convert(polled.raw_lever, &lever_cfg);
     ReleaseSRWLockShared(&poll_lock);
 }
 HRESULT mu3_io_led_init(void) { ensure_init(); return S_OK; }
