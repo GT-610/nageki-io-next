@@ -34,14 +34,15 @@ typedef struct shared_frame {
  * deliberately independent of report age: a change-triggered controller sends
  * nothing while idle, and that must not look like a dead owner.
  *
- * Sizing: an idle worker blocks in the read for IO_TIMEOUT_MS (1000 ms) and
- * ticks once per loop, so the heartbeat interval is about 1000 ms. A reconnect
- * adds a full SetupAPI enumeration, and the game can contend for the CPU during
- * load. At 2000 ms the game process could therefore conclude the owner had died
- * and snap input to neutral under load, which looks like dropped input rather
- * than a crash. The condition worth detecting is amdaemon.exe actually
- * vanishing, which is catastrophic and carries no latency requirement, so the
- * window is deliberately generous. */
+ * Sizing: an idle worker blocks in the read for READ_TICK_MS (50 ms) and ticks
+ * once per loop, so the heartbeat interval is about 50 ms even with the
+ * controller idle. This window is therefore over a hundred missed ticks wide,
+ * generous on purpose. The condition worth detecting is amdaemon.exe actually
+ * vanishing, which is catastrophic and carries no latency requirement, and the
+ * process handle below detects that immediately anyway; this window only
+ * backstops a reused PID or a stale mapping. Widening it further costs nothing
+ * real, while narrowing it under a scheduler stall or a suspended process would
+ * drop input that is still live. */
 #define MU3_OWNER_LIVENESS_MS 5000u
 static LONG last_led_sequence;
 static SRWLOCK led_lock = SRWLOCK_INIT;

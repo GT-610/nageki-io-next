@@ -6,9 +6,27 @@
 #define VID 0x2341
 #define PID 0x8036
 #define RETRY_MS 500
-/* Matches the frozen DLL's Receive(..., timeout=1000). Idle reads timing out is
- * normal for a change-triggered controller and must not invalidate input. */
-#define IO_TIMEOUT_MS 1000
+/* How long one read blocks before the loop re-checks the LED queue and refreshes
+ * the liveness heartbeat. A change-triggered controller sends nothing while the
+ * lever and buttons are still, so an idle read always runs to this timeout.
+ *
+ * The frozen DLL waited 1000 ms here, which also meant an LED frame queued just
+ * after a read began was not written until that read finished: up to a second of
+ * visible lag on the button lights, and about half a second on average. A read
+ * timeout never invalidates input (see io_core.h), and the HID class driver
+ * queues reports that arrive while no read is outstanding, so shortening the
+ * tick only costs a few extra wakeups. */
+#define READ_TICK_MS 50
+/* A write is a real transfer rather than a poll, so it keeps 1000 ms. */
+#define WRITE_TIMEOUT_MS 1000
+/* After a report arrives, keep reading without waiting and keep only the newest.
+ * A backlog builds whenever this process is not scheduled promptly (game
+ * start-up, a scene change, a contended CPU) or the controller streams faster
+ * than the game polls. Delivering that backlog in order would walk the game
+ * through lever and button states that are already stale, which for a rhythm
+ * game is the difference between a hit and a miss. The bound keeps a
+ * continuously streaming device from starving the rest of the loop. */
+#define DRAIN_MAX 8u
 
 static bool stopping(mu3_hid_device *dev) { return WaitForSingleObject(dev->stop, 0) == WAIT_OBJECT_0; }
 
@@ -100,9 +118,12 @@ static HANDLE find_device(size_t *in_len, size_t *out_len)
 }
 
 /* Every path drains pending OVERLAPPED I/O before local buffer/event lifetime ends. */
-/* 1 = complete, 0 = read timeout, -1 = transport failure or shutdown. */
+/* 1 = complete, 0 = read timeout, -1 = transport failure or shutdown.
+ * timeout_ms is how long to wait for the transfer; a read uses READ_TICK_MS so
+ * queued LED frames go out promptly and the heartbeat stays fresh, and the
+ * coalescing step passes 0 to drain whatever the driver already has. */
 static int transfer(mu3_hid_device *dev, HANDLE handle, bool write,
-                    uint8_t *buffer, size_t want, size_t *count)
+                    uint8_t *buffer, size_t want, DWORD timeout_ms, size_t *count)
 {
     OVERLAPPED ov = {0};
     BOOL ok;
@@ -114,11 +135,29 @@ static int transfer(mu3_hid_device *dev, HANDLE handle, bool write,
                : ReadFile(handle, buffer, (DWORD)want, &done, &ov);
     if (!ok && GetLastError() == ERROR_IO_PENDING) {
         HANDLE events[] = {dev->stop, ov.hEvent};
-        waited = WaitForMultipleObjects(2, events, FALSE, IO_TIMEOUT_MS);
+        waited = WaitForMultipleObjects(2, events, FALSE, timeout_ms);
         if (waited != WAIT_OBJECT_0 + 1) {
-            CancelIoEx(handle, &ov);
-            GetOverlappedResult(handle, &ov, &done, TRUE);
+            /* The wait ran out (or shutdown was signalled) with the request still
+             * pending, so cancel it and drain before releasing the buffer and
+             * event. The probe is non-blocking on purpose: a report can complete
+             * in the window between the timeout and the cancellation, and in
+             * that case the driver has already written into the buffer, so the
+             * result is delivered rather than thrown away. Discarding it would
+             * hold the previous state for an extra tick and could lose the last
+             * change of a movement, because a change-triggered controller sends
+             * nothing after it. Only a genuinely cancelled request reports the
+             * timeout. GetOverlappedResult must not wait before the cancel, or
+             * an idle device would block here forever. */
+            BOOL settled = GetOverlappedResult(handle, &ov, &done, FALSE);
+            if (!settled) {
+                CancelIoEx(handle, &ov);
+                settled = GetOverlappedResult(handle, &ov, &done, TRUE);
+            }
             CloseHandle(ov.hEvent);
+            if (settled && done > 0) {
+                if (count) *count = done;
+                return 1;
+            }
             return waited == WAIT_TIMEOUT && !write ? 0 : -1;
         }
         ok = GetOverlappedResult(handle, &ov, &done, FALSE);
@@ -184,6 +223,8 @@ static DWORD WINAPI worker(void *context)
             bool pending;
             size_t count = 0;
             size_t write_len;
+            unsigned drained = 0;
+            int result;
             if (dev->tick) dev->tick(dev->ctx);
             AcquireSRWLockExclusive(&dev->queue_lock);
             pending = dev->pending;
@@ -194,12 +235,21 @@ static DWORD WINAPI worker(void *context)
             write_len = out_len <= sizeof(wire) ? out_len : sizeof(wire);
             if (pending) {
                 mu3_hid_pack(output, wire, write_len);
-                if (transfer(dev, handle, true, wire, write_len, &count) != 1) break;
+                if (transfer(dev, handle, true, wire, write_len, WRITE_TIMEOUT_MS, &count) != 1) break;
             }
-            {
-                int result = transfer(dev, handle, false, raw, in_len, &count);
-                if (result < 0 || stopping(dev)) break;
-                if (result == 0) continue; /* Idle read: never expire held input. */
+            result = transfer(dev, handle, false, raw, in_len, READ_TICK_MS, &count);
+            if (result < 0 || stopping(dev)) break;
+            if (result == 0) continue; /* Idle read: never expire held input. */
+            /* A report arrived, so more are probably queued behind it. Keep
+             * reading without waiting and let each one overwrite the last: only
+             * the newest state is ever delivered, which removes the backlog the
+             * game would otherwise be walked through. The bound stops a device
+             * that streams continuously from starving the LED write above. */
+            while (drained < DRAIN_MAX) {
+                size_t more = 0;
+                if (transfer(dev, handle, false, raw, in_len, 0, &more) != 1) break;
+                count = more; /* raw now holds this newer report */
+                ++drained;
             }
             mu3_hid_unpack(raw, count, frame);
             dev->frame(dev->ctx, frame, MU3_HID_WIRE, GetTickCount64());

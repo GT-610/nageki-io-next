@@ -47,7 +47,7 @@ Building with `/DMU3_IO_REPORT_DISCONNECT` makes poll return `HRESULT_FROM_WIN32
 
 Device connection decides whether input is valid. Once the device connects and one valid report arrives, that report stays in effect until the device goes away, however much time passes. A change-triggered controller sends nothing while the lever and buttons are still, so expiring a report on a timer would release held inputs.
 
-Across processes the same rule holds. Shared memory under `Local\MU3CustomIO-v1` carries a `published_ms` heartbeat that the HID worker refreshes on every tick, and only that heartbeat signals whether the owning process is alive. Report age is never consulted. An absent owner is detected primarily by the process handle: the reader opens the owner PID with `OpenProcess` and finds it unopenable or already signalled, which is immediate. The five-second heartbeat window is a backstop for a reused PID or a stale mapping, and it is deliberately generous because an idle worker's heartbeat interval is about one second and a reconnect adds a full enumeration, so a tight window would drop input under load. Both disconnect and reconnect clear the stored sample, so a stale button or card cannot be replayed.
+Across processes the same rule holds. Shared memory under `Local\MU3CustomIO-v1` carries a `published_ms` heartbeat that the HID worker refreshes on every tick, and only that heartbeat signals whether the owning process is alive. Report age is never consulted. An absent owner is detected primarily by the process handle: the reader opens the owner PID with `OpenProcess` and finds it unopenable or already signalled, which is immediate. The five-second heartbeat window is a backstop for a reused PID or a stale mapping. An idle worker ticks every 50 ms, so that window is over a hundred missed ticks wide, which is deliberate: the condition worth detecting is `amdaemon.exe` actually vanishing, and widening the window costs nothing real while narrowing it under a scheduler stall or a suspended process would drop input that is still live. Both disconnect and reconnect clear the stored sample, so a stale button or card cannot be replayed.
 
 ## Report layout
 
@@ -133,6 +133,10 @@ The DLL matches on VID `2341` and PID `8036`. It does not constrain report lengt
 
 Reports are marshalled between this DLL's fixed 65-byte frame and whatever length the descriptor reports. A device reporting 64 carries payload only, so the frame's Report ID byte is dropped on write and supplied as 0 on read; writing all 65 bytes to such a device would place the ID byte where payload belongs, shift everything by one and drop the last payload byte, which mis-drives the lights rather than failing visibly. Devices reporting more than 65 are zero-padded. `tests/hid_pack_tests.c` covers these mappings.
 
+A read waits at most 50 ms before the loop starts over, so a queued LED frame goes out promptly and the liveness heartbeat stays fresh; a write still waits 1000 ms. A controller that is still sends nothing, so an idle read always runs to that timeout, which affects only how quickly the lights react (up to 1000 ms before) and plays no part in deciding whether input is valid.
+
+After a report arrives, the loop keeps reading without waiting and delivers only the newest one. A backlog builds whenever this process is not scheduled promptly (game start-up, a scene change, a contended CPU) or the controller reports faster than the game polls, and feeding that backlog through in order would walk the game through lever and button states that are already stale. The drain is bounded at eight reports so a continuously streaming device cannot occupy the loop.
+
 ## Card reader
 
 `scan == 1` returns the ten card bytes directly. `scan == 2` treats the first eight bytes as a big-endian hex value and returns its twenty decimal digits encoded as ten BCD bytes. The MIFARE, FeliCa transaction, reader LED and VFD entry points are stubs returning `S_FALSE`, and they advertise no capability the hardware lacks.
@@ -144,9 +148,13 @@ Reports are marshalled between this DLL's fixed 65-byte frame and whatever lengt
 ```
 hid_probe.exe             list HID devices with VID, PID and caps
 hid_probe.exe dump 30000  open the controller and print only changed reports for 30 s
+hid_probe.exe jitter 30000
+                          collect reports for 30 s with the lever untouched
 ```
 
 Run it on the machine the controller is plugged into. Press and release one button at a time; the byte that changes belongs to that button. Push the lever to both stops to read the real range. A capture from the deployed controller has already fixed the report ID, the lever field and its centre; the button, scan and card offsets in this DLL still come from inference, so the probe is what turns them into measurements.
+
+`jitter` answers a different question: how steady is the reading when nobody is touching the lever. A change-triggered controller sends nothing while the stick is still, so the reports that do arrive during that period are the ones electrical noise produced. It prints the arrival rate, the minimum, maximum and spread, and a histogram of values around 1024. A spread of 0 or 1 counts means the reading is already quiet and a noise gate would only suppress genuine slow movement; a larger spread is what would justify one, with the threshold set near the observed spread. The histogram window is 32 counts either side of 1024, and samples outside it are counted separately because that is the lever being moved rather than noise.
 
 ## Deployment
 
