@@ -46,42 +46,94 @@ typedef struct shared_frame {
  * narrowing it under a scheduler stall or a suspended process would drop input
  * that is still live. */
 #define MU3_OWNER_LIVENESS_MS 5000u
+/* How many times one poll tries to copy the owner's sample out. A failure here
+ * is not "no input": see MU3_READ_RETRY in io_core.h. */
+#define MU3_SHARED_ATTEMPTS 3u
 static LONG last_led_sequence;
 static SRWLOCK led_lock = SRWLOCK_INIT;
 static SRWLOCK shared_lock = SRWLOCK_INIT;
 static HANDLE mapping;
 static shared_frame *shared;
-static bool shared_read(mu3_sample *sample)
+/* Outcome of reading the owner's sample. The distinction that matters: a copy
+ * that raced the owner's write is NOT the same thing as the owner being gone.
+ * Collapsing both into "false" and zeroing the sample released every held key
+ * for one poll, which is the one thing this design exists to avoid. The type
+ * and the policy built on it live in io_core.h so the offline tests cover them.
+ * Returns MU3_READ_OK / MU3_READ_RETRY / MU3_READ_GONE. */
+static mu3_read_outcome shared_read(mu3_sample *sample)
 {
-    LONG before, after;
-    DWORD pid;
-    uint64_t published;
-    uint64_t now;
-    HANDLE process;
     unsigned attempt;
-    if (!shared || shared->owner_pid == GetCurrentProcessId()) return false;
-    now = GetTickCount64();
-    for (attempt = 0; attempt < 3; ++attempt) {
+    if (!shared || shared->owner_pid == GetCurrentProcessId()) {
+        return MU3_READ_GONE;
+    }
+    for (attempt = 0; attempt < MU3_SHARED_ATTEMPTS; ++attempt) {
+        LONG before, after;
+        DWORD pid;
+        uint64_t published;
+        uint64_t now;
+        HANDLE process;
+        DWORD alive;
         before = InterlockedCompareExchange(&shared->sequence, 0, 0);
-        if (before & 1) continue;
+        if (before & 1) continue; /* a write is in flight: retry */
         MemoryBarrier();
         pid = shared->owner_pid;
         published = shared->published_ms;
         *sample = shared->sample;
         MemoryBarrier();
         after = InterlockedCompareExchange(&shared->sequence, 0, 0);
-        /* Gate on owner liveness, never on report age. */
-        if (before != after || (after & 1) || !pid || !published ||
-            now < published || now - published > MU3_OWNER_LIVENESS_MS) continue;
-        process = OpenProcess(SYNCHRONIZE, FALSE, pid);
-        if (!process) return false;
-        {
-            DWORD alive = WaitForSingleObject(process, 0);
-            CloseHandle(process);
-            return alive == WAIT_TIMEOUT;
+        /* A torn copy is unusable: mixing two frames could invent or drop a key,
+         * which is worse than either outcome below. Retry, and let the caller
+         * fall back to the previous consistent sample rather than to neutral. */
+        if (before != after || (after & 1)) continue;
+        if (!pid || !published) return MU3_READ_GONE;
+        /* Sampled per attempt and after the copy, so it cannot go stale across
+         * retries the way a single pre-loop reading did: with one reading, an
+         * owner that ticked between the reading and the copy made
+         * `published > now` true for every attempt, turning a benign race into
+         * a hard failure that zeroed the input. A published value at or after
+         * `now` now simply means the heartbeat is fresh. */
+        now = GetTickCount64();
+        if (now >= published && now - published > MU3_OWNER_LIVENESS_MS) {
+            return MU3_READ_GONE; /* the heartbeat has stopped */
         }
+        process = OpenProcess(SYNCHRONIZE, FALSE, pid);
+        if (!process) return MU3_READ_GONE;
+        alive = WaitForSingleObject(process, 0);
+        CloseHandle(process);
+        return alive == WAIT_TIMEOUT ? MU3_READ_OK : MU3_READ_GONE;
     }
-    return false;
+    return MU3_READ_RETRY;
+}
+
+/* Last consistent sample this process read from the owner, and the policy that
+ * uses it. The policy itself lives in io_core.c (mu3_sample_cache_apply) so it
+ * is covered by the offline tests; here it only has to be called correctly. */
+static mu3_sample_cache shared_cache;
+static SRWLOCK cache_lock = SRWLOCK_INIT;
+
+/* Latest usable sample for this process. In the owner the core is read
+ * directly; in the game process the owner's shared frame is read, and a copy
+ * that merely raced the owner's write falls back to the last consistent sample
+ * rather than to neutral. `*out` is always written, so the caller has a neutral
+ * frame when this returns false. */
+static bool read_sample(mu3_sample *out)
+{
+    mu3_health health;
+    mu3_sample scratch;
+    mu3_read_outcome outcome;
+    mu3_sample_source source;
+
+    if (owner) {
+        if (mu3_core_snapshot(&core, out, &health)) return true;
+        memset(out, 0, sizeof(*out));
+        return false;
+    }
+
+    outcome = shared_read(&scratch);
+    AcquireSRWLockExclusive(&cache_lock);
+    source = mu3_sample_cache_apply(&shared_cache, outcome, &scratch, out);
+    ReleaseSRWLockExclusive(&cache_lock);
+    return source != MU3_SAMPLE_NONE;
 }
 static void shared_write(const mu3_sample *sample)
 {
@@ -106,7 +158,11 @@ static BOOL CALLBACK initialize_once(PINIT_ONCE unused, PVOID param, PVOID *cont
     wchar_t path[MAX_PATH];
     const wchar_t *filename;
     (void) unused; (void) param; (void) context;
-    mu3_core_init(&core, -1); /* Report ID unverified until a descriptor is captured. */
+    /* A capture has since confirmed the wire report ID is 0x00, but the check
+     * stays disabled: hid_device already decides header-vs-payload from the
+     * descriptor length, and enabling an extra ID test here could only reject
+     * frames on a device we cannot re-verify. Keep accepting any ID. */
+    mu3_core_init(&core, -1);
     mu3_lever_config_defaults(&lever_cfg);
     init_ms = GetTickCount64();
     mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
@@ -202,12 +258,11 @@ HRESULT mu3_io_init(void)
 HRESULT mu3_io_poll(void)
 {
     mu3_sample next = {0};
-    mu3_health health;
     bool fresh;
     ensure_init();
-    fresh = owner ? mu3_core_snapshot(&core, &next, &health)
-                  : shared_read(&next);
-    if (!fresh) memset(&next, 0, sizeof(next)); /* Neutral, never stale input. */
+    /* read_sample always writes `next`, and writes neutral when there is
+     * nothing to serve, so no separate zeroing step is needed here. */
+    fresh = read_sample(&next);
     AcquireSRWLockExclusive(&poll_lock);
     polled = next;
     ReleaseSRWLockExclusive(&poll_lock);
@@ -276,12 +331,12 @@ HRESULT aime_io_nfc_poll(uint8_t unit) { (void)unit; ensure_init(); return S_OK;
 HRESULT aime_io_nfc_get_aime_id(uint8_t unit, uint8_t *id, size_t size)
 {
     mu3_sample sample;
-    mu3_health health;
     (void)unit;
     ensure_init();
     if (!id || size < MU3_CARD_SIZE) return E_INVALIDARG;
-    if (!(owner ? mu3_core_snapshot(&core, &sample, &health)
-                 : shared_read(&sample))) return S_FALSE;
+    /* Same read path as poll, so a copy that raced the owner's write falls back
+     * to the last consistent sample instead of falsely reporting no card. */
+    if (!read_sample(&sample)) return S_FALSE;
     if (sample.scan == 1) {
         memcpy(id, sample.card, MU3_CARD_SIZE);
         return S_OK;

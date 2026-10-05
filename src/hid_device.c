@@ -237,11 +237,22 @@ static DWORD WINAPI worker(void *context)
             if (pending) { memcpy(output, dev->queued, sizeof(output)); dev->pending = false; }
             ReleaseSRWLockExclusive(&dev->queue_lock);
             /* Size the write from the descriptor, but marshal the frame so the
-             * byte layout matches the device's report length. */
+             * byte layout matches the device's report length.
+             *
+             * A failed write must NOT tear down input. This used to `break` out
+             * of the inner loop, which runs dev->state(false) (input goes
+             * neutral), closes the handle and spends a 500 ms backoff before
+             * re-enumerating: one timed-out LED write cost at least half a
+             * second of no input at all, on a path the game drives
+             * continuously. Input validity is decided by reads, so a failed
+             * write only drops that one queued colour frame and leaves the read
+             * below to detect a device that is genuinely gone. The frame is
+             * already coalesced, so a persistently failing write cannot spin:
+             * it only retries when the game queues a newer colour frame. */
             write_len = out_len <= sizeof(wire) ? out_len : sizeof(wire);
             if (pending) {
                 mu3_hid_pack(output, wire, write_len);
-                if (transfer(dev, handle, true, wire, write_len, WRITE_TIMEOUT_MS, &count) != 1) break;
+                (void)transfer(dev, handle, true, wire, write_len, WRITE_TIMEOUT_MS, &count);
             }
             result = transfer(dev, handle, false, raw, in_len, READ_TICK_MS, &count);
             if (result < 0 || stopping(dev)) break;

@@ -19,7 +19,7 @@ try {
     # fresh timestamp (and PDB GUID), so two builds of identical source differ
     # and a hash identifies "this file" rather than "this source". Verified by
     # building twice and comparing.
-    & $compiler /nologo /Brepro /W4 /WX /wd5105 /std:c11 /LD '/Fe:MU3CustomIO.dll' (Join-Path $root 'src\io_core.c') (Join-Path $root 'src\hid_device.c') (Join-Path $root 'src\led_packet.c') (Join-Path $root 'src\card_id.c') (Join-Path $root 'src\lever.c') (Join-Path $root 'src\mu3_io.c') "/link" '/MACHINE:X64' "/DEF:$(Join-Path $root 'src\mu3_io.def')" setupapi.lib hid.lib
+    & $compiler /nologo /Brepro /W4 /WX /wd5105 /std:c11 /LD '/Fe:MU3CustomIO.dll' (Join-Path $root 'src\button_map.c') (Join-Path $root 'src\io_core.c') (Join-Path $root 'src\hid_device.c') (Join-Path $root 'src\led_packet.c') (Join-Path $root 'src\card_id.c') (Join-Path $root 'src\lever.c') (Join-Path $root 'src\mu3_io.c') "/link" '/MACHINE:X64' "/DEF:$(Join-Path $root 'src\mu3_io.def')" setupapi.lib hid.lib
     if ($LASTEXITCODE -ne 0) { throw "DLL build failed: $LASTEXITCODE" }
     # Guard the exact defect that produced LoadLibraryW error 0x800700c1 on the
     # cabinet: a 32-bit DLL in a 64-bit mu3.exe/amdaemon.exe.
@@ -40,7 +40,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Bind simulation compile failed: $LASTEXITCODE" }
     & (Join-Path $build 'bind_sim.exe') $dllPath
     if ($LASTEXITCODE -ne 0) { throw "Bind simulation failed: $LASTEXITCODE" }
-    & $compiler /nologo /W4 /WX /wd5105 /std:c11 "/Fe:$(Join-Path $build 'hid_probe.exe')" (Join-Path $root 'tests\hid_probe.c') "/link" setupapi.lib hid.lib
+    # hid_probe links the shared button map so the probe and the DLL can never
+    # disagree about which wire byte is which key.
+    & $compiler /nologo /W4 /WX /wd5105 /std:c11 "/Fe:$(Join-Path $build 'hid_probe.exe')" (Join-Path $root 'src\button_map.c') (Join-Path $root 'tests\hid_probe.c') "/link" setupapi.lib hid.lib
     if ($LASTEXITCODE -ne 0) { throw "HID probe compile failed: $LASTEXITCODE" }
 
     # Static analysis over every shipped source file. Runs last because it is
@@ -49,7 +51,8 @@ try {
     $analyzeDir = Join-Path $build 'analyze'
     New-Item -ItemType Directory -Force -Path $analyzeDir | Out-Null
     & $compiler /nologo /c /analyze /W4 /WX /wd5105 /std:c11 "/Fo:$analyzeDir\" `
-        (Join-Path $root 'src\io_core.c') (Join-Path $root 'src\hid_device.c') `
+        (Join-Path $root 'src\button_map.c') (Join-Path $root 'src\io_core.c') `
+        (Join-Path $root 'src\hid_device.c') `
         (Join-Path $root 'src\led_packet.c') (Join-Path $root 'src\card_id.c') `
         (Join-Path $root 'src\lever.c') (Join-Path $root 'src\mu3_io.c')
     if ($LASTEXITCODE -ne 0) { throw "Static analysis failed: $LASTEXITCODE" }

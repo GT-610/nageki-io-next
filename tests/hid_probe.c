@@ -12,12 +12,24 @@
  *                            collect every report for ms while the lever is
  *                            left alone, then report the arrival rate and the
  *                            distribution of the lever field
+ *   hid_probe.exe chord [ms] watch the ten button bytes and report, per key,
+ *                            how many other keys were already held when it went
+ *                            down. This is the device-side truth for a
+ *                            "hold several keys, press one more" fault: run it
+ *                            with the game closed and it is independent of both
+ *                            the IO DLL and segatools.
  *
  * Press and release each button one at a time while dumping; the byte that
  * changes identifies that button. Move the lever to its extremes to get the
  * real ADC range for calibration. Leave the lever alone and run `jitter` to
  * measure how much the reading moves when nobody is touching it, which is the
  * number that decides whether a noise gate is worth having.
+ *
+ * This is how the operator buttons were settled: the rear Test-menu button
+ * showed up as payload byte 23 (wire byte 24) reading 0x03, and the other rear
+ * button as 0x04, both returning to 0x00 on release. Note that `dump` prints
+ * wire bytes from the report ID onward, so the payload offset is one less than
+ * the position in the printed line.
  */
 #include <windows.h>
 #include <hidsdi.h>
@@ -27,15 +39,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../src/button_map.h"
+
 #define VID 0x2341
 #define PID 0x8036
 /* The lever field sits at frame payload offset 10, so wire bytes 11-12 once the
  * report ID byte at 0 is included. Every mode reads it from here. */
 #define LEVER_WIRE_OFFSET 11
-/* A report is payload-only until it is long enough to carry a Report ID byte.
- * This is the same rule the DLL's mu3_hid_unpack applies, so the probe reads the
- * field the DLL would. */
-#define MU3_WIRE_WITH_ID 65
+/* MU3_WIRE_WITH_ID (the length at which byte 0 is a Report ID rather than
+ * payload) comes from src/button_map.h so the probe, the DLL and the offline
+ * tests all share one definition of the report layout. */
 
 static void print_caps(HANDLE h)
 {
@@ -304,6 +317,187 @@ static int measure_jitter(int ms)
     return 0;
 }
 
+/* One report's ten button bytes, read out of the wire layout.
+ *
+ * Delegates to src/button_map.c so the probe and the DLL share one definition
+ * of where the field sits; a disagreement there would misread which key moved,
+ * which looks exactly like a real input fault. */
+static int buttons_from(const uint8_t *buf, DWORD got, size_t in_len,
+                        uint8_t out[MU3_BUTTON_COUNT])
+{
+    return mu3_buttons_from_report(buf, got, in_len, out) ? 1 : 0;
+}
+
+/* Name a key by payload offset. The physical key behind each offset is still
+ * unconfirmed (see src/button_map.h), so the census is reported by offset and
+ * side rather than by a button name that might be wrong. */
+static void key_name(unsigned key, char *out, size_t size)
+{
+    snprintf(out, size, "%s%d", key < MU3_BUTTONS_PER_SIDE ? "L" : "R",
+             (int)(key % MU3_BUTTONS_PER_SIDE) + 1);
+}
+
+/* Device-side truth for a combination-dependent key fault.
+ *
+ * The question this answers: when several keys are held and one more is pressed,
+ * does the controller report the new key at all? It reads the ten button bytes
+ * straight off the wire, so it is independent of the IO DLL, of segatools and of
+ * the game. A key counted at "4 others held" proves the device reported it under
+ * that combination, and the fault is therefore downstream; a key never counted
+ * there while the user is certain they pressed it means the controller's own key
+ * scanning is dropping it, which no DLL change can fix.
+ *
+ * Run it with the game closed: the DLL opens the device for shared read/write,
+ * so both could otherwise consume the same reports. */
+static int chord_census(int ms)
+{
+    size_t in_len = 65;
+    HANDLE dev;
+    ULONGLONG start, end;
+    unsigned reports = 0, unreadable = 0;
+    mu3_chord_census census;
+    mu3_chord_step step;
+    uint8_t buttons[MU3_BUTTON_COUNT];
+    char name[8];
+
+    memset(&census, 0, sizeof(census));
+    dev = open_controller(&in_len);
+    if (dev == INVALID_HANDLE_VALUE) { fprintf(stderr, "Controller not found\n"); return 1; }
+    if (in_len > 512 || in_len == 0) in_len = 65;
+
+    puts("Chord census on the ten button bytes.");
+    puts("");
+    puts("Reproduce the gesture you are unsure about, deliberately and SLOWLY,");
+    puts("many times over. Two things separate a controller fault from a timing");
+    puts("slip: a slip disappears when you slow down, and it does not care which");
+    puts("keys are involved.");
+    puts("");
+    puts("  1. Hold four keys (the same four each time), then press a fifth while");
+    puts("     releasing one of the four. Repeat ten or more times.");
+    puts("  2. Then hold the same four and press the fifth with nothing released.");
+    puts("  3. Also try pressing the fifth alone, from rest, as a control.");
+    puts("");
+    puts("Every change is printed as it happens. Ctrl+C stops early.");
+    printf("Recording for %d ms...\n\n", ms);
+    fflush(stdout);
+
+    start = GetTickCount64();
+    end = start + (ULONGLONG)ms;
+    while (GetTickCount64() < end) {
+        uint8_t buf[512];
+        DWORD got = 0;
+        int result = read_report(dev, buf, in_len, &got, 500);
+        if (result < 0) break;
+        if (result == 0) continue;
+        ++reports;
+        if (!buttons_from(buf, got, in_len, buttons)) { ++unreadable; continue; }
+        if (!mu3_chord_update(&census, buttons, &step)) continue;
+
+        /* Print every change, including one where the bytes moved but the
+         * decoded mask did not; that shape would falsify the polarity model. */
+        printf("[%6llu] held %u -> %u ",
+               (unsigned long long) GetTickCount64(), step.held_before,
+               step.held_after);
+        if (step.down) {
+            unsigned k;
+            printf(" DOWN:");
+            for (k = 0; k < MU3_BUTTON_COUNT; ++k) {
+                if (step.down & (1u << k)) {
+                    key_name(k, name, sizeof(name));
+                    printf(" %s", name);
+                }
+            }
+        }
+        if (step.up) {
+            unsigned k;
+            printf(" UP:");
+            for (k = 0; k < MU3_BUTTON_COUNT; ++k) {
+                if (step.up & (1u << k)) {
+                    key_name(k, name, sizeof(name));
+                    printf(" %s", name);
+                }
+            }
+        }
+        if (!step.mask_changed) printf(" (bytes changed, decoded mask did not)");
+        printf("  bytes:");
+        {
+            unsigned k;
+            for (k = 0; k < MU3_BUTTON_COUNT; ++k) printf(" %02X", buttons[k]);
+        }
+        printf("\n");
+        fflush(stdout);
+    }
+    CloseHandle(dev);
+
+    printf("\n%u report(s) read", reports);
+    if (unreadable) printf(", %u too short to hold the button field", unreadable);
+    printf("\n%u change(s) in the button bytes\n", census.raw_changes);
+
+    if (census.raw_changes == 0) {
+        puts("\nNo button byte ever changed. Either no key was pressed, or the");
+        puts("button field is not at payload offsets 0..9 on this device. Press");
+        puts("one key at a time and re-run `dump` to find which bytes move.");
+        return 0;
+    }
+
+    puts("\nPer-key census (L=left, R=right, by payload offset; a physical");
+    puts("key name is not assumed because the mapping is still unconfirmed):");
+    printf("  %-4s %8s %8s  %s\n", "key", "presses", "releases",
+           "presses by how many other keys were already held");
+    {
+        unsigned k, n;
+        int any_high = 0;
+        for (k = 0; k < MU3_BUTTON_COUNT; ++k) {
+            if (!census.presses[k] && !census.releases[k]) continue;
+            key_name(k, name, sizeof(name));
+            printf("  %-4s %8u %8u  ", name, census.presses[k],
+                   census.releases[k]);
+            for (n = 0; n < MU3_BUTTON_COUNT; ++n) {
+                if (census.presses_with_others[k][n]) {
+                    printf("%u held:%u  ", n, census.presses_with_others[k][n]);
+                    if (n >= 4) any_high = 1;
+                }
+            }
+            printf("\n");
+        }
+        if (!any_high) {
+            puts("\n  No key was ever recorded going down while four or more");
+            puts("  others were held.");
+        }
+    }
+
+    printf("\nMost keys held at once: %u\n", census.max_held);
+    puts("\nByte values seen per key (a binary device shows only 00 and one");
+    puts("other value; a third distinct value means the byte is not a switch):");
+    {
+        unsigned k, v;
+        for (k = 0; k < MU3_BUTTON_COUNT; ++k) {
+            if (census.value_count[k] == 0) continue;
+            key_name(k, name, sizeof(name));
+            printf("  %-4s:", name);
+            for (v = 0; v < census.value_count[k] && v < MU3_CHORD_VALUES_MAX; ++v) {
+                printf(" %02X", census.values_seen[k][v]);
+            }
+            printf("\n");
+        }
+    }
+
+    puts("\nHow to read this:");
+    puts("  * The key you pressed while four others were held appears with a");
+    puts("    count under \"4 held\" -> the controller reported it. The wire is");
+    puts("    not losing your press; look downstream (DLL/segatools/game).");
+    puts("  * It never appears there while you are certain you pressed it, and");
+    puts("    the same specific combination keeps failing at slow speed -> the");
+    puts("    controller's own key scanning is dropping it. That is a matrix");
+    puts("    ghosting/jamming signature and no DLL change can fix it.");
+    puts("  * Failures that move around between combinations, or that vanish");
+    puts("    when you slow down, look like human timing rather than the device.");
+    puts("  * A key showing a third distinct byte value, or a change printed");
+    puts("    with no DOWN/UP at all, points at the polarity/layout hypothesis");
+    puts("    rather than at dropped input.");
+    return 0;
+}
+
 static int dump_reports(int ms)
 {
     size_t in_len = 65;
@@ -354,6 +548,10 @@ int main(int argc, char **argv)
     if (argc >= 2 && _stricmp(argv[1], "jitter") == 0) {
         if (argc >= 3) ms = atoi(argv[2]);
         return measure_jitter(ms > 0 ? ms : 20000);
+    }
+    if (argc >= 2 && _stricmp(argv[1], "chord") == 0) {
+        if (argc >= 3) ms = atoi(argv[2]);
+        return chord_census(ms > 0 ? ms : 60000);
     }
     puts("MU3 HID probe\n");
     return list_devices();

@@ -9,6 +9,66 @@ static void neutral(const mu3_sample *s)
     assert(memcmp(s, &zero, sizeof(zero)) == 0);
 }
 
+/* The cross-process serving policy. The case that matters: a copy that raced
+ * the owner's write must NOT be answered with neutral, because that releases
+ * every held button for one poll. It must serve the previous consistent sample.
+ * The opposite case matters just as much: a departed owner must lose its cache,
+ * so a held button cannot be replayed after the process is gone. */
+static void test_sample_cache(void)
+{
+    mu3_sample_cache cache;
+    mu3_sample a = {0}, b = {0}, out = {0};
+    mu3_sample_source source;
+
+    memset(&cache, 0, sizeof(cache));
+    a.left = 0x0F;
+    a.right = 0x01;
+    a.received_ms = 10;
+    b.left = 0x10;
+    b.received_ms = 20;
+
+    /* Nothing has been read yet: a transient with an empty cache has nothing to
+     * serve, so neutral is correct here. */
+    source = mu3_sample_cache_apply(&cache, MU3_READ_RETRY, NULL, &out);
+    assert(source == MU3_SAMPLE_NONE);
+    neutral(&out);
+
+    source = mu3_sample_cache_apply(&cache, MU3_READ_OK, &a, &out);
+    assert(source == MU3_SAMPLE_FRESH);
+    assert(out.left == 0x0F && out.right == 0x01);
+
+    /* The held keys survive a torn copy. */
+    memset(&out, 0, sizeof(out));
+    source = mu3_sample_cache_apply(&cache, MU3_READ_RETRY, NULL, &out);
+    assert(source == MU3_SAMPLE_CACHED);
+    assert(out.left == 0x0F && out.right == 0x01 && out.received_ms == 10);
+
+    /* A newer consistent read replaces the cache. */
+    source = mu3_sample_cache_apply(&cache, MU3_READ_OK, &b, &out);
+    assert(source == MU3_SAMPLE_FRESH && out.left == 0x10);
+    source = mu3_sample_cache_apply(&cache, MU3_READ_RETRY, NULL, &out);
+    assert(source == MU3_SAMPLE_CACHED && out.left == 0x10);
+
+    /* The owner is gone: neutral, and the cache is dropped so the next
+     * transient cannot resurrect the dead owner's buttons. */
+    source = mu3_sample_cache_apply(&cache, MU3_READ_GONE, NULL, &out);
+    assert(source == MU3_SAMPLE_NONE);
+    neutral(&out);
+    assert(!cache.have_last);
+    source = mu3_sample_cache_apply(&cache, MU3_READ_RETRY, NULL, &out);
+    assert(source == MU3_SAMPLE_NONE);
+    neutral(&out);
+
+    /* Degenerate arguments must not crash or leave a stale cache behind. */
+    source = mu3_sample_cache_apply(NULL, MU3_READ_OK, &a, &out);
+    assert(source == MU3_SAMPLE_NONE);
+    source = mu3_sample_cache_apply(&cache, MU3_READ_OK, &a, NULL);
+    assert(source == MU3_SAMPLE_NONE);
+    source = mu3_sample_cache_apply(&cache, MU3_READ_OK, NULL, &out);
+    assert(source == MU3_SAMPLE_NONE);
+    assert(!cache.have_last);
+}
+
 int main(void)
 {
     mu3_core core;
@@ -96,13 +156,17 @@ int main(void)
     assert(mu3_core_snapshot(&core, &sample, &health));
     assert(sample.left == 0 && sample.scan == 0 && sample.sequence == 1);
 
-    /* report_id == -1 accepts any report ID until a descriptor is captured. */
+    /* report_id == -1 accepts any report ID. The real wire ID is 0x00, but the
+     * header-vs-payload decision belongs to mu3_hid_unpack, so no ID test is
+     * enforced here; see io_core.h. */
     assert(mu3_core_init(&core, -1));
     mu3_core_open(&core);
     frame[0] = 7;
     assert(mu3_core_publish(&core, frame, sizeof(frame), 200));
     assert(mu3_core_snapshot(&core, &sample, &health));
     assert(sample.sequence == 1);
+
+    test_sample_cache();
 
     puts("offline IO core tests passed");
     return 0;

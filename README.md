@@ -35,7 +35,7 @@ pwsh ./scripts/package.ps1
 
 `build.ps1` builds the DLL, checks the PE header, loads the DLL and calls its exports, then runs a bind simulation. The simulation copies the symbol order and per-version symbol counts from segatools' `mu3_dll_syms` and `aime_dll_syms`. segatools binds all names or none and stops at the first missing one, so the simulation reports `mu3 7/7` and `aime 17/17`.
 
-`test.ps1` runs synthetic tests for the input core, the LED packet encoder, card conversion and lever conversion. `build/` and `dist/` are gitignored.
+`test.ps1` runs synthetic tests for the button map, the input core, the LED packet encoder, card conversion, lever conversion and HID marshalling. `build/` and `dist/` are gitignored.
 
 ## Fault handling
 
@@ -53,6 +53,8 @@ One consequence is worth stating. If the firmware stalls while the device stays 
 
 Across processes the same rule holds. Shared memory under `Local\MU3CustomIO-v1` carries a `published_ms` heartbeat that the HID worker refreshes on every tick, and only that heartbeat signals whether the owning process is alive. Report age is never consulted. An absent owner is detected primarily by the process handle: the reader opens the owner PID with `OpenProcess` and finds it unopenable or already signalled, which is immediate. The five-second heartbeat window is a backstop for a reused PID or a stale mapping. A silent worker still ticks every 50 ms and a streaming one ticks far faster, so that window is hundreds of missed ticks wide, which is deliberate: the condition worth detecting is `amdaemon.exe` actually vanishing, and widening the window costs nothing real while narrowing it under a scheduler stall or a suspended process would drop input that is still live. Both disconnect and reconnect clear the stored sample, so a stale button or card cannot be replayed.
 
+A shared-memory read separates two failures that look alike but must not be answered the same way. If the copy raced the owner's write, the copy is torn and unusable — mixing two frames could invent or drop a key — but the owner is still alive and ticking, so the reader serves the previous consistent sample. That sample is a frame the device really sent, and for a held button it is still the truth; answering neutral instead would release every held button for one poll. If the owner is gone, the answer is neutral and the cached sample is dropped, so a departed owner's held button can never be replayed. `tests/core_tests.c` covers this policy, including that a departed owner clears the cache.
+
 ## Report layout
 
 Reports are 65 bytes: one report ID byte followed by a 64-byte payload.
@@ -67,7 +69,20 @@ Reports are 65 bytes: one report ID byte followed by a 64-byte payload.
 
 A button byte counts as pressed when it is nonzero, so a device reporting `0x00`/`0xFF` behaves like one reporting 0/1. A scan value of anything except 1 or 2 means no card, and the rest of that report is still used.
 
-A capture with `hid_probe.exe dump` confirms the report ID byte, which is `0x00`, and the lever field at bytes 11-12 little-endian, matching payload offsets 10-11. The button, scan, card and operator offsets still come from protocol analysis of an existing implementation and have not been checked against a capture; `hid_probe.exe` is how to confirm them.
+A capture with `hid_probe.exe dump` confirms the report ID byte, which is `0x00`, the lever field at bytes 11-12 little-endian (payload offsets 10-11), and the operator byte at payload offset 23. The button, scan and card offsets still come from protocol analysis of an existing implementation and have not been checked against a capture; `hid_probe.exe` is how to confirm them.
+
+That same capture read the two rear buttons off payload offset 23. They are the only two nonzero values this byte ever took:
+
+| Byte | Meaning |
+|---|---|
+| `0x03` | the button that opens the Test menu: declares **Test and Service together** |
+| `0x04` | the other button: **Coin** only |
+
+Bit assignments are segatools's: `TEST=0x01`, `SERVICE=0x02`, `COIN=0x04` ([mu3io.h](legacy-repository/references/segatools/games/mu3io/mu3io.h)). A standalone `0x02` was never observed, so this controller cannot produce a Service-only event, and whether `0x03` is a firmware constant or a second electrical input is not determined. `0x04` cannot open the Test menu because it does not carry bit 0, which is what identifies it as the second button without needing an in-game test.
+
+Two consequences. **Coin cannot be verified in game**: `mu3hook` increments the credit count on every poll where the bit is set rather than on a rising edge ([io4.c](legacy-repository/references/segatools/games/mu3hook/io4.c)), so holding the button counts many credits, and `mercuryhook` in the same tree does have the edge check. And **Service is not separately reachable** from this controller: both bits always appear together.
+
+Rewriting this byte inside the IO DLL is the only way to separate the two keys, since the firmware cannot be reflashed. The DLL does have that power — `mu3_io_get_opbtns` returns the byte as it sees fit — but the meaning of each bit is fixed by segatools, the current build passes the byte through unchanged (`polled.operator_buttons & 7`), and anything that fabricates a Test-then-Service sequence would make this DLL stop reporting the controller's real state. It is deliberately **not implemented**: neither rear button is needed beyond reaching the Test menu, which does not justify giving up faithful pass-through. Performance is not the reason — that function reads one already-captured byte per call, so a bit manipulation there would be negligible.
 
 ## Lever conversion
 
@@ -141,11 +156,21 @@ Reports are marshalled between this DLL's fixed 65-byte frame and whatever lengt
 
 A read waits at most 50 ms before the loop starts over; a write still waits 1000 ms. The deployed controller streams at about 200 reports/s, so a read returns in roughly 5 ms and that timeout is only reached when the device has gone quiet, where its only jobs are bounding how long a queued LED frame waits and keeping the heartbeat fresh. It never decides whether input is valid.
 
+Input validity is decided by reads alone. A write that fails or times out drops that one queued colour frame and nothing else; the read that follows is what detects a device that is genuinely gone. Input and output are independent paths, so one failed colour write must not be able to take the buttons down with it.
+
 The controller currently reports about 200 times per second while the game polls far less often, so reports are continuously queued and every one but the last is already superseded by the time it is read. The loop therefore keeps reading without waiting and delivers only the newest report, bounded at eight. Feeding the queue through in order would walk the game through lever and button states that are already stale. The game reads the current level through `mu3_io_get_gamebtns` and `mu3_io_get_lever`, so a discarded report carries no information it could have observed.
 
 ## Card reader
 
 `scan == 1` returns the ten card bytes directly. `scan == 2` treats the first eight bytes as a big-endian hex value and returns its twenty decimal digits encoded as ten BCD bytes. The MIFARE, FeliCa transaction, reader LED and VFD entry points are stubs returning `S_FALSE`, and they advertise no capability the hardware lacks.
+
+## Button decoding
+
+The ten discrete button bytes at payload offsets 0-9 (five left, then five right) are decoded by `src/button_map.c`. A byte counts as pressed when it is nonzero, so a device reporting `0x00`/`0xFF` behaves like one reporting 0/1.
+
+Each byte sets its own bit and nothing else: no bit is shifted across bytes and no byte is combined with another. That is per-key independence, and it means no key's state can influence another key's bit, so a fault that depends on which keys are held cannot originate in this DLL. `tests/button_map_tests.c` asserts it exhaustively over all 1024 possible button-byte vectors, rather than leaving it as a claim about the source.
+
+The same module is linked into `hid_probe.exe`, so the probe and the DLL share one definition of which wire byte is which key and of where the button field sits in a report. Two independent re-derivations could disagree, and a disagreement there would misread which key moved — indistinguishable from a real input fault.
 
 ## Probe
 
@@ -156,6 +181,9 @@ hid_probe.exe             list HID devices with VID, PID and caps
 hid_probe.exe dump 30000  open the controller and print only changed reports for 30 s
 hid_probe.exe jitter 30000
                           collect reports for 30 s with the lever untouched
+hid_probe.exe chord 60000
+                          census of the ten button bytes, per key, by how many
+                          other keys were held when it went down
 ```
 
 Run it on the machine the controller is plugged into. Press and release one button at a time; the byte that changes belongs to that button. Push the lever to both stops to read the real range. A capture from the deployed controller has already fixed the report ID, the lever field and its centre; the button, scan and card offsets in this DLL still come from inference, so the probe is what turns them into measurements.
@@ -163,6 +191,8 @@ Run it on the machine the controller is plugged into. Press and release one butt
 `jitter` measures how steady the reading is when nobody is touching the lever, which is what decides whether a noise gate is worth having. It prints the arrival rate, the minimum, maximum and spread, and a histogram of values around 1024. On the deployed controller the result was 5986 reports in 30 s (about 200 reports/s) all reading the same value, a spread of 0, so a noise gate is not warranted: it would only suppress genuine slow movement. The histogram window is 32 counts either side of 1024, and samples outside it are counted separately because that is the lever being moved rather than noise.
 
 `jitter` also prints the resting value and its offset from 1024. That offset is **not** a drift measurement and **not** a calibration: the stick is mechanical and cannot be parked exactly at the electrical centre, so it rests wherever it happens to rest. The deployed controller read 1035 at rest (+11, about 704 units of lever output at sensitivity 2), and an earlier capture of the same controller read 1026 (+2). Those are two different stick positions, not a change in the hardware, and neither is grounds for adjusting `lever_neutral`. What the spread and histogram do establish is that the reading is stable and exactly reproducible while the stick is untouched.
+
+`chord` answers a different question: when several keys are held and one more is pressed, does the controller report the new key at all? It reads the ten button bytes straight off the wire, so — run with the game closed — its result depends on neither this DLL nor segatools. It prints every change as it happens and ends with a per-key census, including how many times each key went down while a given number of other keys were already held. A key counted under "4 held" was reported by the controller under that combination, so the press was not lost on the wire and any loss is downstream. A key never counted there, while the user is certain they pressed it and the same combination keeps failing at slow speed, points at the controller's own key scanning — a matrix ghosting or jamming signature, which no DLL change can fix. Failures that move between combinations, or that vanish when the pace is slowed, look like human timing instead. The census also records the distinct byte values seen per key, because a binary switch should only ever show `00` and one nonzero value; a third value would falsify the polarity model. Keys are reported by payload offset (`L1`..`L5`, `R1`..`R5`) rather than by physical name, because the byte-to-key mapping is still unconfirmed; the census only ever compares an offset against itself, so its result does not depend on the names being right.
 
 ## Deployment
 

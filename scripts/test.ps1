@@ -13,7 +13,12 @@ $build = Join-Path $root 'build'
 New-Item -ItemType Directory -Force -Path $build | Out-Null
 Push-Location $build
 try {
-    & $compiler /nologo /W4 /WX /wd5105 /std:c11 "/Fe:$(Join-Path $build 'core_tests.exe')" (Join-Path $root 'src\io_core.c') (Join-Path $root 'tests\core_tests.c')
+    & $compiler /nologo /W4 /WX /wd5105 /std:c11 "/Fe:$(Join-Path $build 'button_map_tests.exe')" (Join-Path $root 'src\button_map.c') (Join-Path $root 'tests\button_map_tests.c')
+    if ($LASTEXITCODE -ne 0) { throw "Button map test compile failed: $LASTEXITCODE" }
+    & (Join-Path $build 'button_map_tests.exe')
+    if ($LASTEXITCODE -ne 0) { throw "Button map tests failed: $LASTEXITCODE" }
+    # io_core.c now decodes buttons through button_map.c, so it needs it too.
+    & $compiler /nologo /W4 /WX /wd5105 /std:c11 "/Fe:$(Join-Path $build 'core_tests.exe')" (Join-Path $root 'src\button_map.c') (Join-Path $root 'src\io_core.c') (Join-Path $root 'tests\core_tests.c')
     if ($LASTEXITCODE -ne 0) { throw "Compiler failed: exit $LASTEXITCODE" }
     & (Join-Path $build 'core_tests.exe')
     if ($LASTEXITCODE -ne 0) { throw "Offline IO tests failed: exit $LASTEXITCODE" }

@@ -43,7 +43,10 @@ typedef struct mu3_sample {
     uint16_t raw_lever; /* Uncalibrated LE field; not yet a game lever. */
     uint8_t scan;
     uint8_t card[MU3_CARD_SIZE];
-    uint8_t operator_buttons; /* Raw byte; coin edge meaning unverified. */
+    uint8_t operator_buttons; /* Payload offset 23, capture-confirmed. 1=Test,
+                              * 2=Service, 4=Coin; the Test button reports 3
+                              * (Test+Service together), so Service is never
+                              * seen alone on this controller. */
     uint64_t received_ms;
     uint64_t sequence;
 } mu3_sample;
@@ -52,13 +55,16 @@ typedef struct mu3_core {
     SRWLOCK lock;
     mu3_sample latest;
     mu3_health health;
-    int report_id; /* -1 skips ID check until a real descriptor is captured. */
+    int report_id; /* -1 accepts any ID. A capture showed the wire ID is 0x00, but
+                    * the descriptor length is what decides header-vs-payload
+                    * (mu3_hid_unpack), so no ID test is enforced here. */
     bool have_frame;
 } mu3_core;
 
-/* report_id is the expected HID report ID, or -1 to accept any ID until a real
- * descriptor is captured. Only one reader may publish reports; getters can run
- * on arbitrary threads. */
+/* report_id is the expected HID report ID, or -1 to accept any ID. Pass -1:
+ * the real wire ID is 0x00, and the header-vs-payload decision belongs to
+ * mu3_hid_unpack, which keys off the descriptor length rather than this value.
+ * Only one reader may publish reports; getters can run on arbitrary threads. */
 bool mu3_core_init(mu3_core *core, int report_id);
 /* Device opened or re-opened: connected, waiting for the first report. Clears
  * the previous sample so a reconnect can never replay stale input. */
@@ -79,5 +85,45 @@ void mu3_core_disconnect(mu3_core *core);
  * and adding one would reinstate the age-based invalidation this rule exists to
  * avoid for genuinely held input. */
 bool mu3_core_snapshot(mu3_core *core, mu3_sample *out, mu3_health *health);
+
+/* Cross-process sample serving.
+ *
+ * The game process reads the owner's sample out of shared memory. Two failures
+ * look similar but must not be answered the same way:
+ *
+ *   - the copy raced the owner's write (torn, unusable) while the owner is
+ *     alive and ticking. The right answer is the previous consistent sample: it
+ *     is a frame the device really sent, and for a held button it is still the
+ *     truth. Answering neutral here would release every held key for one poll,
+ *     which is exactly what this design exists to avoid.
+ *   - the owner is gone. The right answer is neutral, and the cache must be
+ *     dropped so a dead owner's held button can never be replayed.
+ *
+ * Getting the second case wrong is the dangerous one, so it is stated in the
+ * type rather than left to a caller's discretion. */
+typedef enum mu3_read_outcome {
+    MU3_READ_OK,    /* a consistent sample was copied into the caller's buffer */
+    MU3_READ_RETRY, /* owner alive and ticking; the copy raced its write */
+    MU3_READ_GONE   /* no owner, owner not alive, or heartbeat stopped */
+} mu3_read_outcome;
+
+typedef enum mu3_sample_source {
+    MU3_SAMPLE_FRESH,  /* *out is the sample just read */
+    MU3_SAMPLE_CACHED, /* *out is the previous consistent sample */
+    MU3_SAMPLE_NONE    /* nothing to serve; *out is neutral */
+} mu3_sample_source;
+
+typedef struct mu3_sample_cache {
+    mu3_sample last;
+    bool have_last;
+} mu3_sample_cache;
+
+/* Fold one read outcome into the cache and decide what to serve. `sample` is
+ * read only for MU3_READ_OK; `out` is always written, so the caller has a
+ * neutral sample whenever the result is MU3_SAMPLE_NONE. */
+mu3_sample_source mu3_sample_cache_apply(mu3_sample_cache *cache,
+                                         mu3_read_outcome outcome,
+                                         const mu3_sample *sample,
+                                         mu3_sample *out);
 
 #endif
