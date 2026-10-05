@@ -27,6 +27,7 @@ Copy-Item -LiteralPath $dll -Destination (Join-Path $stage 'MU3CustomIO.dll') -F
 Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination (Join-Path $stage 'README.md') -Force
 Copy-Item -LiteralPath (Join-Path $root 'README.zh-CN.md') -Destination (Join-Path $stage 'README.zh-CN.md') -Force
 Copy-Item -LiteralPath (Join-Path $build 'hid_probe.exe') -Destination (Join-Path $stage 'hid_probe.exe') -Force
+Copy-Item -LiteralPath (Join-Path $build 'trace_analyze.exe') -Destination (Join-Path $stage 'trace_analyze.exe') -Force
 # Optional tuning file: copy it as .ini.txt so a drop-in never silently
 # changes behaviour; the operator renames it to MU3CustomIO.ini to enable it.
 $ini = Join-Path $stage 'MU3CustomIO.ini.txt'
@@ -49,14 +50,28 @@ $ini = Join-Path $stage 'MU3CustomIO.ini.txt'
     'the other rear button 0x04 (Coin), and this DLL passes both through'
     'unchanged. Rewriting that byte to separate the two keys would make the'
     'DLL stop reporting the controller''s real state; it is not implemented.'
+    ''
+    'BUTTON TRACE (off by default; needs no exclusive access to the cabinet).'
+    'Remove the semicolons from the two lines below and restart mu3.exe and'
+    'amdaemon.exe. Each process then writes a log beside this DLL, of only'
+    'button CHANGES:'
+    '  MU3CustomIO-wire.log    the button bytes as the device sent them'
+    '  MU3CustomIO-served.log  the sample mu3_io_poll handed the game'
+    'Analyze with:  trace_analyze.exe MU3CustomIO-wire.log'
+    'A key that misbehaves on the wire is a controller fault. A key clean on'
+    'the wire but missing from served is a software fault.'
+    '; [trace]'
+    '; enabled=1'
 ) | Set-Content -Encoding ascii -LiteralPath $ini
 
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stage 'MU3CustomIO.dll')).Hash
 $probeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stage 'hid_probe.exe')).Hash
+$analyzeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stage 'trace_analyze.exe')).Hash
 @(
-    "MU3CustomIO.dll  SHA256 $hash",
-    "hid_probe.exe    SHA256 $probeHash",
-    "architecture     x64 (machine=0x8664, PE32+)",
+    "MU3CustomIO.dll   SHA256 $hash",
+    "hid_probe.exe     SHA256 $probeHash",
+    "trace_analyze.exe SHA256 $analyzeHash",
+    "architecture      x64 (machine=0x8664, PE32+)",
     "",
     "Verified offline: PE architecture, DLL load, 26 exports, segatools bind",
     "simulation (mu3 7/7, aime 17/17), core/LED/card/lever/HID-marshalling and",
@@ -114,11 +129,20 @@ $probeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stage 'hid
     "four or more keys already held was reported by the controller under that",
     "combination. See the output for how to read it.",
     "",
+    "hid_probe.exe needs the cabinet to itself. When it is in use, enable the",
+    "in-DLL trace instead ([trace] enabled=1 in MU3CustomIO.ini) and run",
+    "trace_analyze.exe over MU3CustomIO-wire.log afterwards. That reports, per",
+    "key, how often it clicked: a release and re-press within 15 ms, which a",
+    "player cannot do on purpose and a bouncing contact does by itself. Read it",
+    "as clicks per press, not as a raw count, and compare the keys against each",
+    "other: one key clicking while the others stay near zero is the hardware,",
+    "all keys clicking alike is the player.",
+    "",
     "Still NOT verified on hardware: the key bytes (0-9), scan/card and LED",
     "mapping, in-game fault display, amdaemon.exe being the sole HID owner.",
     "The lever field and the operator byte ARE capture-confirmed (above).") | Set-Content -Encoding utf8 -LiteralPath (Join-Path $stage 'SHA256.txt')
 
 Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
-Compress-Archive -LiteralPath (Join-Path $stage 'MU3CustomIO.dll'), (Join-Path $stage 'hid_probe.exe'), (Join-Path $stage 'MU3CustomIO.ini.txt'), (Join-Path $stage 'README.md'), (Join-Path $stage 'README.zh-CN.md'), (Join-Path $stage 'SHA256.txt') -DestinationPath $zip -Force
+Compress-Archive -LiteralPath (Join-Path $stage 'MU3CustomIO.dll'), (Join-Path $stage 'hid_probe.exe'), (Join-Path $stage 'trace_analyze.exe'), (Join-Path $stage 'MU3CustomIO.ini.txt'), (Join-Path $stage 'README.md'), (Join-Path $stage 'README.zh-CN.md'), (Join-Path $stage 'SHA256.txt') -DestinationPath $zip -Force
 Get-FileHash -Algorithm SHA256 -LiteralPath $zip | Format-List
 Get-Item -LiteralPath $zip | Select-Object FullName, Length

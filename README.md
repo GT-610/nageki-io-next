@@ -35,7 +35,7 @@ pwsh ./scripts/package.ps1
 
 `build.ps1` builds the DLL, checks the PE header, loads the DLL and calls its exports, then runs a bind simulation. The simulation copies the symbol order and per-version symbol counts from segatools' `mu3_dll_syms` and `aime_dll_syms`. segatools binds all names or none and stops at the first missing one, so the simulation reports `mu3 7/7` and `aime 17/17`.
 
-`test.ps1` runs synthetic tests for the button map, the input core, the LED packet encoder, card conversion, lever conversion and HID marshalling. `build/` and `dist/` are gitignored.
+`test.ps1` runs synthetic tests for the button map, the trace, the input core, the LED packet encoder, card conversion, lever conversion and HID marshalling. `build/` and `dist/` are gitignored.
 
 ## Fault handling
 
@@ -171,6 +171,41 @@ The ten discrete button bytes at payload offsets 0-9 (five left, then five right
 Each byte sets its own bit and nothing else: no bit is shifted across bytes and no byte is combined with another. That is per-key independence, and it means no key's state can influence another key's bit, so a fault that depends on which keys are held cannot originate in this DLL. `tests/button_map_tests.c` asserts it exhaustively over all 1024 possible button-byte vectors, rather than leaving it as a claim about the source.
 
 The same module is linked into `hid_probe.exe`, so the probe and the DLL share one definition of which wire byte is which key and of where the button field sits in a report. Two independent re-derivations could disagree, and a disagreement there would misread which key moved — indistinguishable from a real input fault.
+
+## Button trace
+
+A second, opt-in instrument exists for the case the probe cannot cover: the cabinet is in use by a player, so nothing can take the device exclusively. The DLL already holds the device, so it can record what the controller reported during real play without disturbing it.
+
+It is off unless `MU3CustomIO.ini` beside the DLL says:
+
+```
+[trace]
+enabled=1
+```
+
+With tracing off, nothing opens a file and the cost is one branch per report. With it on, each process writes one log beside the DLL, in the format `trace_analyze.exe` reads:
+
+| File | Written by | Contains |
+|---|---|---|
+| `MU3CustomIO-wire.log` | `amdaemon.exe` (the HID owner) | button bytes straight off the device |
+| `MU3CustomIO-served.log` | `mu3.exe` | the sample `mu3_io_poll` hands the game |
+
+Both are timestamped from `QueryPerformanceCounter`, which is comparable across processes on one machine and fine enough to measure a switch bounce; `GetTickCount64` is not, at about 15.6 ms. Only button *changes* are written, so an idle stream produces nothing. Each file starts with a baseline line so the first real transition has something to compare against.
+
+The distinction the two files draw: a key that misbehaves on the wire is a controller fault, and a key that is clean on the wire but missing from the served log is a software fault. The wire file is the one that settles a hardware question, because a contact that opens mid-hold shows up there as down, up, down — something no layer above the device could invent.
+
+```
+trace_analyze.exe MU3CustomIO-wire.log
+```
+
+The analyzer reports, per key, presses, releases and *clicks*: a release and re-press of one key within 15 ms. A player cannot do that deliberately in a rhythm game, so a click is a bouncing contact — the switch opened briefly while the key was being held. It also reports the shortest complete press-release seen per key, which is the single clearest sign of a worn switch: a few hundred microseconds there is a contact making and breaking, not a finger.
+
+Two normalisations matter, and both are printed:
+
+- **Clicks per press**, not the raw click count. A key played twice as often shows twice the clicks for the same defect rate, so a raw count mostly measures how much the key is used. The rate is what compares one switch against another.
+- **The control.** One key clicking on a percent of its presses while the others stay near zero, at comparable press counts, is a difference between two switches under the same player. Every key clicking at a similar rate points at the player or the environment instead.
+
+The analyzer derives each transition from the byte columns and uses those for the verdict, ignoring the `down=`/`up=` text; it reports how often the two disagreed. A log with a wrong text column still produces the right answer instead of a confidently wrong one.
 
 ## Probe
 
