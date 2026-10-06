@@ -47,7 +47,6 @@ typedef struct mu3_sample {
                               * (Test+Service together), so Service is never
                               * seen alone on this controller. */
     uint64_t received_ms;
-    uint64_t sequence;
 } mu3_sample;
 
 typedef struct mu3_core {

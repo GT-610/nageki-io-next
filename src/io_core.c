@@ -67,7 +67,6 @@ bool mu3_core_publish(mu3_core *core, const uint8_t *report, size_t size,
         ReleaseSRWLockExclusive(&core->lock);
         return false;
     }
-    next.sequence = core->latest.sequence + 1;
     core->latest = next;
     core->have_frame = true;
     core->health = MU3_FRESH;

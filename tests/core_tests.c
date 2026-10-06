@@ -98,7 +98,7 @@ int main(void)
     assert(!mu3_core_publish(&core, frame, sizeof(frame) - 1, 100)); /* short */
     assert(mu3_core_publish(&core, frame, sizeof(frame), 100));
     assert(mu3_core_snapshot(&core, &sample, &health));
-    assert(health == MU3_FRESH && sample.sequence == 1);
+    assert(health == MU3_FRESH);
     assert(sample.left == 0x15 && sample.right == 0x11);
     assert(sample.raw_lever == 0x1234 && sample.scan == 1);
     assert(sample.card[0] == 0xAA && sample.operator_buttons == 4);
@@ -112,27 +112,29 @@ int main(void)
      * path.) */
     assert(sample.received_ms == 100);
     assert(mu3_core_snapshot(&core, &sample, &health));
-    assert(health == MU3_FRESH && sample.left == 0x15 && sample.sequence == 1);
+    assert(health == MU3_FRESH && sample.left == 0x15);
     assert(mu3_core_snapshot(&core, &sample, &health));
     assert(sample.left == 0x15);
 
     frame[1] = 2; /* nonzero counts as pressed, as the frozen DLL assumed */
     assert(mu3_core_publish(&core, frame, sizeof(frame), 101));
     assert(mu3_core_snapshot(&core, &sample, &health));
-    assert(sample.left == 0x15 && sample.sequence == 2);
+    assert(sample.left == 0x15);
     frame[1] = 1;
+    /* A report older than the held one must not replace it, so the sample is
+     * still the frame published at 101. */
     assert(!mu3_core_publish(&core, frame, sizeof(frame), 99)); /* older stamp */
     assert(mu3_core_snapshot(&core, &sample, &health));
-    assert(sample.sequence == 2);
+    assert(sample.left == 0x15);
     frame[13] = 3; /* out-of-range scan means "no card", not a dropped frame */
     assert(mu3_core_publish(&core, frame, sizeof(frame), 110));
     assert(mu3_core_snapshot(&core, &sample, &health));
-    assert(sample.sequence == 3 && sample.scan == 0);
+    assert(sample.scan == 0);
     assert(sample.left == 0x15); /* buttons survive the unknown scan value */
     frame[13] = 1;
     assert(mu3_core_publish(&core, frame, sizeof(frame), 111));
     assert(mu3_core_snapshot(&core, &sample, &health));
-    assert(sample.sequence == 4 && sample.scan == 1);
+    assert(sample.scan == 1);
 
     /* 0xFF button bytes must still produce input. */
     memset(frame, 0, sizeof(frame));
@@ -147,14 +149,14 @@ int main(void)
     neutral(&sample);
     assert(!mu3_core_publish(&core, frame, sizeof(frame), 113));
 
-    /* Reconnect must not replay the old sample and restarts sequence numbering. */
+    /* Reconnect must not replay the old sample. */
     mu3_core_open(&core);
     assert(!mu3_core_snapshot(&core, &sample, &health));
     neutral(&sample);
     memset(frame, 0, sizeof(frame));
     assert(mu3_core_publish(&core, frame, sizeof(frame), 114));
     assert(mu3_core_snapshot(&core, &sample, &health));
-    assert(sample.left == 0 && sample.scan == 0 && sample.sequence == 1);
+    assert(sample.left == 0 && sample.scan == 0);
 
     /* report_id == -1 accepts any report ID. The real wire ID is 0x00, but the
      * header-vs-payload decision belongs to mu3_hid_unpack, so no ID test is
@@ -164,7 +166,7 @@ int main(void)
     frame[0] = 7;
     assert(mu3_core_publish(&core, frame, sizeof(frame), 200));
     assert(mu3_core_snapshot(&core, &sample, &health));
-    assert(sample.sequence == 1);
+    assert(sample.scan == 0);
 
     test_sample_cache();
 
