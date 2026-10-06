@@ -14,8 +14,10 @@ int main(void)
     mu3_led_packet(rgb, out);
     assert(out[0] == 0 && out[1] == 0 && out[2] == 255);
     assert(out[3] == 255 && out[11] == 255 && out[18] == 255 && out[26] == 255);
+    /* rgb[0], rgb[8], rgb[9] and rgb[17] are nonzero, so the four lit
+     * channels are payload offsets 3, 11, 18 and 26. */
     for (i = 3; i < 65; ++i) {
-        if (i == 11 || i == 18 || i == 26) continue; /* the lit channels */
+        if (i == 3 || i == 11 || i == 18 || i == 26) continue; /* lit channels */
         assert(out[i] == 0);
     }
     /* An all-zero input must clear the channels without disturbing the header. */
