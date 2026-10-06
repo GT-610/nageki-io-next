@@ -152,7 +152,6 @@ static void test_calibration_readings_are_not_lever_values(void)
             uint16_t adcs = (uint16_t)((0x7FFF - lever) & 0xFFFF);
             assert((lever & 1) == 0);           /* lever is always even */
             assert((adcs & 1u) == 1u);          /* adcs is therefore odd */
-            assert((uint16_t)adcs == (uint16_t)((0x7FFF - lever) & 0xFFFF));
         }
     }
     cfg.sensitivity = MU3_LEVER_SENSITIVITY_DEFAULT;
