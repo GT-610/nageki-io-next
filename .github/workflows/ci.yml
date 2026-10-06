@@ -1,0 +1,49 @@
+name: CI
+
+# Analysis on every push and pull request. The release build is a separate
+# workflow so that a tag never publishes anything this job did not vet.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# Cancel superseded runs on the same ref: a new push makes the older commit's
+# results irrelevant, and the jobs are mostly waiting on a compiler.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Build, test and analyse
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # windows-latest ships Visual Studio Enterprise with the C++ workload, so
+      # the toolchain is already present and scripts/toolchain.ps1 finds it
+      # through vswhere. No install step is needed, and adding one would only
+      # risk installing a second toolset alongside the preinstalled one.
+      - name: Build the DLL, smoke-test it and run the bind simulation
+        shell: pwsh
+        run: ./scripts/build.ps1
+
+      - name: Run the offline test suites
+        shell: pwsh
+        run: ./scripts/test.ps1
+
+      # build.ps1 already runs MSVC /analyze over every shipped source with
+      # /WX, so a code-analysis warning fails the build above rather than
+      # needing a separate step here.
+      - name: Report the toolchain that was used
+        shell: pwsh
+        run: |
+          . ./scripts/toolchain.ps1
+          $t = Initialize-MsvcEnvironment
+          Write-Output "MSVC $($t.Version) / SDK $($t.Sdk)"
+          Write-Output "from $($t.VsRoot)"
