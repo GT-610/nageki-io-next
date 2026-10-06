@@ -44,15 +44,29 @@ jobs:
             exit 1
           }
           Write-Output "name=$($zip[0].Name)" >> $env:GITHUB_OUTPUT
-          Write-Output "path=$($zip[0].FullName)" >> $env:GITHUB_OUTPUT
 
       # Release notes are not generated: the archive already carries a SHA256.txt
       # describing exactly what was built and what has not been verified on the
       # cabinet, which is the information a downloader actually needs. Auto-appending
       # every commit would bury that.
+      # --verify-tag aborts if the tag is missing, rather than silently creating
+      # one from the default branch, which would publish a build of the wrong
+      # commit. --latest is stated explicitly instead of left to GitHub's
+      # automatic choice. gh uploads to a draft and publishes only after the
+      # upload succeeds, so a failed upload cannot leave a visible empty release.
+      #
+      # The file name is used rather than an absolute path so that nothing with
+      # backslashes is interpolated into the command.
       - name: Publish the release
         shell: pwsh
+        working-directory: ./dist
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$env:TAG" '${{ steps.artifact.outputs.path }}' --title $env:TAG --verify-tag --notes "See SHA256.txt inside the archive for the file hashes and for what has and has not been verified on the cabinet."
+        run: >-
+          gh release create "$env:TAG"
+          '${{ steps.artifact.outputs.name }}'
+          --title "$env:TAG"
+          --verify-tag
+          --latest
+          --notes "See SHA256.txt inside the archive for the file hashes and for what has and has not been verified on the cabinet."
