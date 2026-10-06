@@ -158,11 +158,11 @@ static BOOL CALLBACK initialize_once(PINIT_ONCE unused, PVOID param, PVOID *cont
     wchar_t path[MAX_PATH];
     const wchar_t *filename;
     (void) unused; (void) param; (void) context;
-    /* A capture has since confirmed the wire report ID is 0x00, but the check
-     * stays disabled: hid_device already decides header-vs-payload from the
-     * descriptor length, and enabling an extra ID test here could only reject
-     * frames on a device we cannot re-verify. Keep accepting any ID. */
-    mu3_core_init(&core, -1);
+    /* No report-ID check, deliberately. A capture confirms the wire report ID is
+     * 0x00, but hid_device already decides header-vs-payload from the descriptor
+     * length, and an extra ID test here could only reject frames on a device we
+     * cannot re-verify. Keep accepting any ID. */
+    mu3_core_init(&core);
     mu3_lever_config_defaults(&lever_cfg);
     init_ms = GetTickCount64();
     mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,

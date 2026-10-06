@@ -76,8 +76,7 @@ int main(void)
     mu3_health health;
     uint8_t frame[MU3_REPORT_SIZE] = {0};
 
-    assert(!mu3_core_init(&core, 256));
-    assert(mu3_core_init(&core, 0));
+    mu3_core_init(&core);
     assert(!mu3_core_snapshot(&core, &sample, &health));
     assert(health == MU3_NO_DEVICE);
     neutral(&sample);
@@ -85,9 +84,7 @@ int main(void)
     mu3_core_open(&core);
     assert(!mu3_core_snapshot(&core, &sample, &health));
     assert(health == MU3_WAITING_FOR_FRAME);
-    frame[0] = 1;
-    assert(!mu3_core_publish(&core, frame, sizeof(frame), 100)); /* wrong ID */
-    frame[0] = 0;
+    frame[0] = 1; /* a nonzero report ID must be accepted; see mu3_io.c */
     frame[1] = frame[3] = frame[5] = 1;
     frame[6] = frame[10] = 1;
     frame[11] = 0x34;
@@ -158,15 +155,12 @@ int main(void)
     assert(mu3_core_snapshot(&core, &sample, &health));
     assert(sample.left == 0 && sample.scan == 0);
 
-    /* report_id == -1 accepts any report ID. The real wire ID is 0x00, but the
-     * header-vs-payload decision belongs to mu3_hid_unpack, so no ID test is
-     * enforced here; see io_core.h. */
-    assert(mu3_core_init(&core, -1));
-    mu3_core_open(&core);
-    frame[0] = 7;
-    assert(mu3_core_publish(&core, frame, sizeof(frame), 200));
-    assert(mu3_core_snapshot(&core, &sample, &health));
-    assert(sample.scan == 0);
+    /* Re-initialising a core mid-test must reset it to the no-device state, so a
+     * reused core cannot serve a stale frame. */
+    mu3_core_init(&core);
+    assert(!mu3_core_snapshot(&core, &sample, &health));
+    assert(health == MU3_NO_DEVICE);
+    neutral(&sample);
 
     test_sample_cache();
 

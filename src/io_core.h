@@ -53,17 +53,11 @@ typedef struct mu3_core {
     SRWLOCK lock;
     mu3_sample latest;
     mu3_health health;
-    int report_id; /* -1 accepts any ID. A capture showed the wire ID is 0x00, but
-                    * the descriptor length is what decides header-vs-payload
-                    * (mu3_hid_unpack), so no ID test is enforced here. */
     bool have_frame;
 } mu3_core;
 
-/* report_id is the expected HID report ID, or -1 to accept any ID. Pass -1:
- * the real wire ID is 0x00, and the header-vs-payload decision belongs to
- * mu3_hid_unpack, which keys off the descriptor length rather than this value.
- * Only one reader may publish reports; getters can run on arbitrary threads. */
-bool mu3_core_init(mu3_core *core, int report_id);
+/* Only one reader may publish reports; getters can run on arbitrary threads. */
+void mu3_core_init(mu3_core *core);
 /* Device opened or re-opened: connected, waiting for the first report. Clears
  * the previous sample so a reconnect can never replay stale input. */
 void mu3_core_open(mu3_core *core);

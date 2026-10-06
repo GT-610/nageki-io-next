@@ -3,16 +3,14 @@
 
 #include <string.h>
 
-bool mu3_core_init(mu3_core *core, int report_id)
+void mu3_core_init(mu3_core *core)
 {
-    if (core == NULL || report_id < -1 || report_id > 255) {
-        return false;
+    if (core == NULL) {
+        return;
     }
     memset(core, 0, sizeof(*core));
     InitializeSRWLock(&core->lock);
     core->health = MU3_NO_DEVICE;
-    core->report_id = report_id;
-    return true;
 }
 
 void mu3_core_open(mu3_core *core)
@@ -29,8 +27,7 @@ bool mu3_core_publish(mu3_core *core, const uint8_t *report, size_t size,
 {
     mu3_sample next = {0};
     const uint8_t *payload;
-    if (core == NULL || report == NULL || size != MU3_REPORT_SIZE ||
-        (core->report_id >= 0 && report[0] != core->report_id)) {
+    if (core == NULL || report == NULL || size != MU3_REPORT_SIZE) {
         return false;
     }
     payload = report + 1;
