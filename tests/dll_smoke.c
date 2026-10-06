@@ -44,10 +44,14 @@ int main(int argc, char **argv)
     ((lever_fn)GetProcAddress(dll, "mu3_io_get_lever"))(&lever);
     if (left || right || lever) return 5;
     if (((card_fn)GetProcAddress(dll, "aime_io_nfc_get_aime_id"))(0, card, sizeof(card)) != S_FALSE) return 6;
-    Sleep(3200);
     /* Offline must stay S_OK: segatools treats a failure from init/poll as
      * fatal (mu3hook/dllmain.c -> ExitProcess), and the frozen DLL always
-     * returned S_OK here. A dead controller shows up as neutral input. */
+     * returned S_OK here. A dead controller shows up as neutral input.
+     *
+     * There is no wait before this poll. The disconnect-reporting variant that
+     * would need one is compiled only under /DMU3_IO_REPORT_DISCONNECT, which
+     * the build does not define, so this build's mu3_io_poll returns S_OK
+     * unconditionally and waiting would not change the outcome. */
     hr = ((poll_fn)GetProcAddress(dll, "mu3_io_poll"))();
     if (hr != S_OK) { fprintf(stderr, "Offline poll must be S_OK, got %#lx\n", hr); return 7; }
     left = 255; right = 255; lever = 123;
