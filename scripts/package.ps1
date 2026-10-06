@@ -1,9 +1,31 @@
+param(
+    # Version to embed in the archive name, e.g. '1.0.0' -> MU3CustomIO-x64-1.0.0.zip
+    [string]$Version = ''
+)
+
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $build = Join-Path $root 'build'
-$stage = Join-Path $root 'dist\MU3CustomIO-x64-test'
-$zip = Join-Path $root 'dist\MU3CustomIO-x64-test.zip'
 $dll = Join-Path $build 'MU3CustomIO.dll'
+
+# The archive name carries the version so that two releases can be told apart
+# from their download alone, rather than both being MU3CustomIO-x64-test.zip.
+# A release run passes the tag it was triggered by; a local packaging run falls
+# back to whatever -Version is given, or leaves the name unversioned so an
+# ordinary local build is not mistaken for a release artifact.
+$version = if ($env:MU3_VERSION) { $env:MU3_VERSION }
+           elseif ($PSBoundParameters.ContainsKey('Version')) { $Version }
+           else { '' }
+if ($version) {
+    if ($version -notmatch '^[0-9A-Za-z][0-9A-Za-z._-]*$') {
+        throw "Refusing to package: '$version' is not usable in a file name."
+    }
+    $archive = "MU3CustomIO-x64-$version"
+} else {
+    $archive = 'MU3CustomIO-x64'
+}
+$stage = Join-Path $root "dist\$archive"
+$zip = Join-Path $root "dist\$archive.zip"
 
 if (-not (Test-Path -LiteralPath $dll)) { throw 'Run scripts/build.ps1 first (no DLL in build/)' }
 
@@ -79,9 +101,10 @@ $analyzeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stage 't
     "independent over all 1024 possible button-byte vectors, so a fault that",
     "depends on which keys are held cannot originate in this DLL.",
     "",
-    "Not yet verified on the cabinet: the two input-path fixes below. They are",
-    "structural fixes for defects read out of the code, not diagnoses of an",
-    "observed symptom.",
+    "On the cabinet: buttons, lever, card reading and the button lights run",
+    "steadily. Two input-path defects were fixed for this build after being",
+    "read out of the code rather than from an observed symptom, and are",
+    "covered by tests/core_tests.c:",
     "  1. A failed LED write no longer tears down input. It used to break the",
     "     read loop, which reported neutral input for at least the 500 ms",
     "     reconnect backoff: one timed-out colour write cost half a second of",
@@ -138,9 +161,11 @@ $analyzeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stage 't
     "other: one key clicking while the others stay near zero is the hardware,",
     "all keys clicking alike is the player.",
     "",
-    "Still NOT verified on hardware: the key bytes (0-9), scan/card and LED",
-    "mapping, in-game fault display, amdaemon.exe being the sole HID owner.",
-    "The lever field and the operator byte ARE capture-confirmed (above).") | Set-Content -Encoding utf8 -LiteralPath (Join-Path $stage 'SHA256.txt')
+    "Still inferred rather than checked against a capture: which physical key",
+    "sits at which button byte (0-9), the scan/card layout, and the LED channel",
+    "mapping. Also unverified: the in-game fault display, and amdaemon.exe being",
+    "the sole HID owner. The lever field and the operator byte ARE",
+    "capture-confirmed (above).") | Set-Content -Encoding utf8 -LiteralPath (Join-Path $stage 'SHA256.txt')
 
 Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
 Compress-Archive -LiteralPath (Join-Path $stage 'MU3CustomIO.dll'), (Join-Path $stage 'hid_probe.exe'), (Join-Path $stage 'trace_analyze.exe'), (Join-Path $stage 'MU3CustomIO.ini.txt'), (Join-Path $stage 'README.md'), (Join-Path $stage 'README.zh-CN.md'), (Join-Path $stage 'SHA256.txt') -DestinationPath $zip -Force

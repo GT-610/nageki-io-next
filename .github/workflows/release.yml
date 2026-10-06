@@ -28,12 +28,17 @@ jobs:
         shell: pwsh
         run: ./scripts/test.ps1
 
+      # The tag becomes the version in the archive name, so a download says
+      # which version it is instead of only the release page saying so.
       - name: Assemble the distribution zip
         shell: pwsh
+        env:
+          MU3_VERSION: ${{ github.ref_name }}
         run: ./scripts/package.ps1
 
-      # package.ps1 writes the zip at a fixed name unrelated to the tag, and the
-      # runner is fresh on every release, so the glob finds exactly one archive.
+      # The archive now carries the tag in its name. The runner is still a clean
+      # checkout, so the glob must find exactly one: anything else is a stale
+      # leftover that must not be uploaded.
       - name: Locate the produced archive
         id: artifact
         shell: pwsh
