@@ -42,6 +42,15 @@
  * byte vectors. out pointers may be NULL; a NULL payload decodes to all-up. */
 void mu3_buttons_decode(const uint8_t *payload, uint8_t *left, uint8_t *right);
 
+/* Short name for a key by payload offset: "L1".."L5" then "R1".."R5".
+ *
+ * Deliberately an offset label and not a physical key name. The byte-to-key
+ * mapping is still unconfirmed, and every consumer only ever compares a key
+ * against itself (before/after, wire/served), so a wrong name would be
+ * cosmetic - but a name that looked authoritative and was wrong would send
+ * someone to test the wrong switch. `size` must be at least 4. */
+void mu3_key_name(unsigned key, char *out, size_t size);
+
 /* Copy the ten button bytes out of a wire report into `out`, in payload order.
  *
  * Whether byte 0 of the transfer is a Report ID or the first payload byte is a

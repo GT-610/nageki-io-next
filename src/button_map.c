@@ -1,5 +1,6 @@
 #include "button_map.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* Record a byte value for a key unless it has already been seen. Silently stops
@@ -36,6 +37,17 @@ void mu3_buttons_decode(const uint8_t *payload, uint8_t *left, uint8_t *right)
     }
     if (left != NULL) *left = l;
     if (right != NULL) *right = r;
+}
+
+void mu3_key_name(unsigned key, char *out, size_t size)
+{
+    if (out == NULL || size == 0) return;
+    if (key >= MU3_BUTTON_COUNT) {
+        out[0] = '\0';
+        return;
+    }
+    snprintf(out, size, "%c%u", key < MU3_BUTTONS_PER_SIDE ? 'L' : 'R',
+             (unsigned)(key % MU3_BUTTONS_PER_SIDE) + 1);
 }
 
 bool mu3_buttons_from_report(const uint8_t *wire, size_t got, size_t wire_len,

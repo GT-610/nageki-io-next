@@ -1,0 +1,72 @@
+name: Release
+
+# Tag-driven: v*.*.* only, so an untagged branch push never produces a release.
+# The tag is what a cabinet operator downloads, so this runs the same checks CI
+# does before anything is published.
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, test and publish
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the DLL, smoke-test it and run the bind simulation
+        shell: pwsh
+        run: ./scripts/build.ps1
+
+      - name: Run the offline test suites
+        shell: pwsh
+        run: ./scripts/test.ps1
+
+      - name: Assemble the distribution zip
+        shell: pwsh
+        run: ./scripts/package.ps1
+
+      # package.ps1 writes the zip at a fixed name unrelated to the tag, and the
+      # runner is fresh on every release, so the glob finds exactly one archive.
+      - name: Locate the produced archive
+        id: artifact
+        shell: pwsh
+        run: |
+          $zip = @(Get-ChildItem -Path ./dist -Filter '*.zip' -File)
+          if ($zip.Count -ne 1) {
+            Write-Error "Expected exactly one zip under dist/, found $($zip.Count)"
+            exit 1
+          }
+          Write-Output "name=$($zip[0].Name)" >> $env:GITHUB_OUTPUT
+
+      # Release notes are not generated: the archive already carries a SHA256.txt
+      # describing exactly what was built and what has not been verified on the
+      # cabinet, which is the information a downloader actually needs. Auto-appending
+      # every commit would bury that.
+      # --verify-tag aborts if the tag is missing, rather than silently creating
+      # one from the default branch, which would publish a build of the wrong
+      # commit. --latest is stated explicitly instead of left to GitHub's
+      # automatic choice. gh uploads to a draft and publishes only after the
+      # upload succeeds, so a failed upload cannot leave a visible empty release.
+      #
+      # The file name is used rather than an absolute path so that nothing with
+      # backslashes is interpolated into the command.
+      - name: Publish the release
+        shell: pwsh
+        working-directory: ./dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: >-
+          gh release create "$env:TAG"
+          '${{ steps.artifact.outputs.name }}'
+          --title "$env:TAG"
+          --verify-tag
+          --latest
+          --notes "See SHA256.txt inside the archive for the file hashes and for what has and has not been verified on the cabinet."

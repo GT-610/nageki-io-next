@@ -1,16 +1,12 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$vsRoot = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC'
-$kitRoot = 'C:\Program Files (x86)\Windows Kits\10'
-$version = Get-ChildItem -LiteralPath $vsRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
-$kit = Get-ChildItem -LiteralPath (Join-Path $kitRoot 'Include') -Directory | Sort-Object Name -Descending | Select-Object -First 1
-if (-not $version -or -not $kit) { throw 'MSVC and Windows SDK required' }
+. (Join-Path $PSScriptRoot 'toolchain.ps1')
 # segatools LoadLibraryW's this DLL inside mu3.exe and amdaemon.exe, which are
 # both 64-bit (the frozen MU3Input.dll is machine=0x8664). x86 here only ever
-# produces ERROR_BAD_EXE_FORMAT (0x800700c1) at load time.
-$compiler = Join-Path $version.FullName 'bin\Hostx64\x64\cl.exe'
-$env:INCLUDE = @((Join-Path $version.FullName 'include'), (Join-Path $kit.FullName 'ucrt'), (Join-Path $kit.FullName 'um'), (Join-Path $kit.FullName 'shared')) -join ';'
-$env:LIB = @((Join-Path $version.FullName 'lib\x64'), (Join-Path $kitRoot "Lib\$($kit.Name)\ucrt\x64"), (Join-Path $kitRoot "Lib\$($kit.Name)\um\x64")) -join ';'
+# produces ERROR_BAD_EXE_FORMAT (0x800700c1) at load time, so the host triple is
+# fixed to Hostx64\x64.
+$toolchain = Initialize-MsvcEnvironment
+$compiler = $toolchain.Compiler
 $build = Join-Path $root 'build'
 New-Item -ItemType Directory -Force -Path $build | Out-Null
 Push-Location $build
@@ -19,7 +15,7 @@ try {
     # fresh timestamp (and PDB GUID), so two builds of identical source differ
     # and a hash identifies "this file" rather than "this source". Verified by
     # building twice and comparing.
-    & $compiler /nologo /Brepro /W4 /WX /wd5105 /std:c11 /LD '/Fe:MU3CustomIO.dll' (Join-Path $root 'src\button_map.c') (Join-Path $root 'src\io_core.c') (Join-Path $root 'src\hid_device.c') (Join-Path $root 'src\led_packet.c') (Join-Path $root 'src\card_id.c') (Join-Path $root 'src\lever.c') (Join-Path $root 'src\mu3_io.c') "/link" '/MACHINE:X64' "/DEF:$(Join-Path $root 'src\mu3_io.def')" setupapi.lib hid.lib
+    & $compiler /nologo /Brepro /W4 /WX /wd5105 /std:c11 /LD '/Fe:MU3CustomIO.dll' (Join-Path $root 'src\button_map.c') (Join-Path $root 'src\trace.c') (Join-Path $root 'src\io_core.c') (Join-Path $root 'src\hid_device.c') (Join-Path $root 'src\led_packet.c') (Join-Path $root 'src\card_id.c') (Join-Path $root 'src\lever.c') (Join-Path $root 'src\mu3_io.c') "/link" '/MACHINE:X64' "/DEF:$(Join-Path $root 'src\mu3_io.def')" setupapi.lib hid.lib
     if ($LASTEXITCODE -ne 0) { throw "DLL build failed: $LASTEXITCODE" }
     # Guard the exact defect that produced LoadLibraryW error 0x800700c1 on the
     # cabinet: a 32-bit DLL in a 64-bit mu3.exe/amdaemon.exe.
@@ -45,13 +41,18 @@ try {
     & $compiler /nologo /W4 /WX /wd5105 /std:c11 "/Fe:$(Join-Path $build 'hid_probe.exe')" (Join-Path $root 'src\button_map.c') (Join-Path $root 'tests\hid_probe.c') "/link" setupapi.lib hid.lib
     if ($LASTEXITCODE -ne 0) { throw "HID probe compile failed: $LASTEXITCODE" }
 
+    # Reads the DLL's opt-in trace and reports the per-key bounce evidence.
+    & $compiler /nologo /W4 /WX /wd5105 /std:c11 "/Fe:$(Join-Path $build 'trace_analyze.exe')" (Join-Path $root 'tests\trace_analyze.c')
+    if ($LASTEXITCODE -ne 0) { throw "Trace analyzer compile failed: $LASTEXITCODE" }
+
     # Static analysis over every shipped source file. Runs last because it is
     # the slowest step. /analyze warnings are /WX errors, so this fails the
     # build rather than printing something easy to miss.
     $analyzeDir = Join-Path $build 'analyze'
     New-Item -ItemType Directory -Force -Path $analyzeDir | Out-Null
     & $compiler /nologo /c /analyze /W4 /WX /wd5105 /std:c11 "/Fo:$analyzeDir\" `
-        (Join-Path $root 'src\button_map.c') (Join-Path $root 'src\io_core.c') `
+        (Join-Path $root 'src\button_map.c') (Join-Path $root 'src\trace.c') `
+        (Join-Path $root 'src\io_core.c') `
         (Join-Path $root 'src\hid_device.c') `
         (Join-Path $root 'src\led_packet.c') (Join-Path $root 'src\card_id.c') `
         (Join-Path $root 'src\lever.c') (Join-Path $root 'src\mu3_io.c')

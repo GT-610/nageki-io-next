@@ -7,6 +7,7 @@
 #include "led_packet.h"
 #include "card_id.h"
 #include "lever.h"
+#include "trace.h"
 
 /* MU3 1.1 (7 symbols) + Aime 1.1 (17 symbols). C / __cdecl exports, .def
  * provides undecorated names on x86. No device operation runs in DllMain. */
@@ -22,6 +23,10 @@ static ULONGLONG init_ms;
 #endif
 static volatile LONG owner = 0;
 static mu3_lever_config lever_cfg;
+/* MU3CustomIO.ini beside the DLL, or empty when it could not be derived. Kept
+ * because the trace opens its log from this same path after the ownership
+ * decision, which is the first point at which the channel is known. */
+static wchar_t ini_path[MAX_PATH];
 typedef struct shared_frame {
     volatile LONG sequence;
     DWORD owner_pid;
@@ -176,6 +181,7 @@ static BOOL CALLBACK initialize_once(PINIT_ONCE unused, PVOID param, PVOID *cont
      * the exe: both mu3.exe and amdaemon.exe load this one DLL, so the DLL's
      * own directory is the one place both processes agree on. A missing or
      * partial file simply keeps the defaults, so this can never fail a load. */
+    ini_path[0] = L'\0';
     {
         HMODULE self = NULL;
         wchar_t dll_path[MAX_PATH];
@@ -187,6 +193,7 @@ static BOOL CALLBACK initialize_once(PINIT_ONCE unused, PVOID param, PVOID *cont
             dot = wcsrchr(dll_path, L'.');
             if (dot && (size_t)(dot - dll_path) + 5 <= MAX_PATH) {
                 if (wcscpy_s(dot, 5, L".ini") == 0) {
+                    wcscpy_s(ini_path, MAX_PATH, dll_path);
                     mu3_lever_config_load(&lever_cfg, dll_path);
                 }
             }
@@ -200,6 +207,14 @@ static BOOL CALLBACK initialize_once(PINIT_ONCE unused, PVOID param, PVOID *cont
             InterlockedExchange(&started, 1);
         }
     }
+    /* Opens a log only when MU3CustomIO.ini says trace=1; otherwise this is a
+     * single INI read and the trace stays compiled in but inert. Opened after
+     * the ownership decision because each process logs a different channel: the
+     * owner logs the wire, the game process logs what it served. Both files are
+     * timestamped from the same clock so they can be aligned afterwards. */
+    mu3_trace_open(ini_path, InterlockedCompareExchange(&owner, 0, 0)
+                                 ? MU3_TRACE_WIRE
+                                 : MU3_TRACE_SERVED);
     return TRUE;
 }
 
@@ -236,6 +251,15 @@ static void on_frame(void *ctx, const uint8_t *report, size_t size, uint64_t now
     if (mu3_core_publish(state, report, size, now) &&
         mu3_core_snapshot(state, &sample, &health)) {
         shared_write(&sample);
+        /* Wire channel: the real button bytes, at payload offsets 0..9 of the
+         * frame just accepted, timed where the report was read. This is the
+         * file that decides a hardware question, because a contact that opens
+         * mid-hold shows up here as down, up, down - something no software
+         * layer above the device could invent. Logged only for a frame the core
+         * accepted, so the trace and the served input describe the same frames.
+         * The real byte values (not just on/off) are written, which is what
+         * would expose a non-binary or polarity-inverted key. */
+        mu3_trace_wire_bytes(mu3_trace_now_us(), report + 1);
     }
 }
 static void on_state(void *ctx, bool connected)
@@ -261,11 +285,18 @@ HRESULT mu3_io_poll(void)
     bool fresh;
     ensure_init();
     /* read_sample always writes `next`, and writes neutral when there is
-     * nothing to serve, so no separate zeroing step is needed here. */
+     * nothing to serve. */
     fresh = read_sample(&next);
     AcquireSRWLockExclusive(&poll_lock);
     polled = next;
     ReleaseSRWLockExclusive(&poll_lock);
+    /* Served channel: what this process is about to hand the game, after the
+     * shared-memory hop. Timed after the lock is released so a slow disk can
+     * never extend the time the poll lock is held. Compared against the owner's
+     * wire log, a key that is clean on the wire and missing here is a software
+     * fault; a key that chatters here but not on the wire would point at this
+     * path instead. */
+    mu3_trace_served_masks(mu3_trace_now_us(), next.left, next.right);
     /* Poll must also stay S_OK. A failure here propagates out of
      * io4_async_poll (common/board/io4.c:349) into the virtual IO4 read and
      * aborts start-up the same way. Stale/absent input is reported as neutral

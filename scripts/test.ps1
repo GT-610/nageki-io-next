@@ -1,14 +1,8 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$vsRoot = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC'
-$kitRoot = 'C:\Program Files (x86)\Windows Kits\10'
-$version = Get-ChildItem -LiteralPath $vsRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
-$kit = Get-ChildItem -LiteralPath (Join-Path $kitRoot 'Include') -Directory | Sort-Object Name -Descending | Select-Object -First 1
-if (-not $version -or -not $kit) { throw 'MSVC and Windows SDK are required for offline tests' }
-$compiler = Join-Path $version.FullName 'bin\Hostx64\x64\cl.exe'
-if (-not (Test-Path -LiteralPath $compiler)) { throw "MSVC compiler missing: $compiler" }
-$env:INCLUDE = @((Join-Path $version.FullName 'include'), (Join-Path $kit.FullName 'ucrt'), (Join-Path $kit.FullName 'um'), (Join-Path $kit.FullName 'shared')) -join ';'
-$env:LIB = @((Join-Path $version.FullName 'lib\x64'), (Join-Path $kitRoot "Lib\$($kit.Name)\ucrt\x64"), (Join-Path $kitRoot "Lib\$($kit.Name)\um\x64")) -join ';'
+. (Join-Path $PSScriptRoot 'toolchain.ps1')
+$toolchain = Initialize-MsvcEnvironment
+$compiler = $toolchain.Compiler
 $build = Join-Path $root 'build'
 New-Item -ItemType Directory -Force -Path $build | Out-Null
 Push-Location $build
@@ -17,6 +11,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Button map test compile failed: $LASTEXITCODE" }
     & (Join-Path $build 'button_map_tests.exe')
     if ($LASTEXITCODE -ne 0) { throw "Button map tests failed: $LASTEXITCODE" }
+    & $compiler /nologo /W4 /WX /wd5105 /std:c11 "/Fe:$(Join-Path $build 'trace_tests.exe')" (Join-Path $root 'src\button_map.c') (Join-Path $root 'src\trace.c') (Join-Path $root 'tests\trace_tests.c')
+    if ($LASTEXITCODE -ne 0) { throw "Trace test compile failed: $LASTEXITCODE" }
+    & (Join-Path $build 'trace_tests.exe')
+    if ($LASTEXITCODE -ne 0) { throw "Trace tests failed: $LASTEXITCODE" }
     # io_core.c now decodes buttons through button_map.c, so it needs it too.
     & $compiler /nologo /W4 /WX /wd5105 /std:c11 "/Fe:$(Join-Path $build 'core_tests.exe')" (Join-Path $root 'src\button_map.c') (Join-Path $root 'src\io_core.c') (Join-Path $root 'tests\core_tests.c')
     if ($LASTEXITCODE -ne 0) { throw "Compiler failed: exit $LASTEXITCODE" }
