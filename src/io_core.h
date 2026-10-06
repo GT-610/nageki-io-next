@@ -27,7 +27,6 @@
 #include <windows.h>
 
 #define MU3_REPORT_SIZE 65u
-#define MU3_PAYLOAD_SIZE 64u
 #define MU3_CARD_SIZE 10u
 
 typedef enum mu3_health {
