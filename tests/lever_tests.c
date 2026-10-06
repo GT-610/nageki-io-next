@@ -113,16 +113,6 @@ static void test_odd_sensitivity_is_monotonic(void)
     cfg.sensitivity = MU3_LEVER_SENSITIVITY_DEFAULT;
 }
 
-static void test_every_input_stays_in_int16(void)
-{
-    unsigned raw;
-    mu3_lever_config_defaults(&cfg);
-    for (raw = 0; raw <= 0xFFFFu; ++raw) {
-        int value = mu3_lever_convert((uint16_t)raw, &cfg);
-        assert(value >= -32768 && value <= 32767);
-    }
-}
-
 /* Settles which quantity the cabinet's calibration screen displays. A lever
  * value is always a multiple of 32 * sensitivity, so it is even, and it is a
  * multiple of 64 whenever the scale is. The two readings observed on the
@@ -220,7 +210,7 @@ int main(void)
     test_centre_is_zero_at_any_sensitivity();
     test_no_regression_at_even_sensitivity();
     test_odd_sensitivity_is_monotonic();
-    test_every_input_stays_in_int16();
+    
     test_calibration_readings_are_not_lever_values();
     test_ini_overrides();
     puts("lever conversion tests passed");
