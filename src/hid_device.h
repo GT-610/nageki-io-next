@@ -23,8 +23,6 @@ typedef struct mu3_hid_device {
     void (*tick)(void *);
 } mu3_hid_device;
 bool mu3_hid_start(mu3_hid_device *dev, void *ctx, mu3_hid_frame_fn frame, mu3_hid_state_fn state, void (*tick)(void *));
-/* Stop only during orderly teardown; never from DllMain. */
-void mu3_hid_stop(mu3_hid_device *dev);
 /* Coalesce to the most recent color frame; never blocks on USB. */
 void mu3_hid_queue(mu3_hid_device *dev, const uint8_t report[MU3_HID_WIRE]);
 /* Marshalling between the fixed 65-byte frame and a descriptor's transfer

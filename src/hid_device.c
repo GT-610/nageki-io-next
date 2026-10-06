@@ -296,15 +296,6 @@ bool mu3_hid_start(mu3_hid_device *dev, void *ctx, mu3_hid_frame_fn frame, mu3_h
     return true;
 }
 
-void mu3_hid_stop(mu3_hid_device *dev)
-{
-    if (!dev || !dev->thread) return;
-    SetEvent(dev->stop);
-    WaitForSingleObject(dev->thread, INFINITE);
-    CloseHandle(dev->thread); CloseHandle(dev->stop);
-    dev->thread = NULL; dev->stop = NULL;
-}
-
 void mu3_hid_queue(mu3_hid_device *dev, const uint8_t report[MU3_HID_WIRE])
 {
     if (!dev || !report || !dev->thread) return;
